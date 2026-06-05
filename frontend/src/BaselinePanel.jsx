@@ -109,16 +109,18 @@ export default function BaselinePanel({
 
   const handleCheckAll = async () => {
     try {
-      const results = await checkAllBaselines(tolerance);
+      const data = await checkAllBaselines(tolerance);
       const resultMap = new Map();
-      results.forEach(r => {
+      data.results.forEach(r => {
         if (r.passed !== undefined) {
           resultMap.set(r.id, r);
         }
       });
       setCheckResults(resultMap);
-      const passed = results.filter(r => r.passed).length;
-      showNotification(`批量检测完成: ${passed}/${results.length} 通过`, passed === results.length ? 'success' : 'warning');
+      showNotification(
+        `批量检测完成: ${data.passCount}/${data.total} 通过, ${data.failCount} 失败`,
+        data.failCount === 0 ? 'success' : 'warning'
+      );
     } catch (e) {
       showNotification('批量检测失败: ' + e.message, 'error');
     }

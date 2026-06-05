@@ -210,77 +210,167 @@ class BaselineEngine {
         });
       }
     }
-    return results;
+    const passCount = results.filter(r => r.passed).length;
+    const failCount = results.filter(r => !r.passed).length;
+    return {
+      results,
+      passCount,
+      failCount,
+      total: results.length
+    };
   }
 
-  findBlameSource(changedCellName, baselineMap, currentMap, computeGraph) {
-    const visited = new Set();
-    const path = [];
+  isCellChanged(cellName, baselineMap, currentMap) {
+    const baselineCell = baselineMap.get(cellName);
+    const currentCell = currentMap.get(cellName);
 
-    const findUpstream = (cellName) => {
-      if (visited.has(cellName)) return null;
+    if (!baselineCell || !currentCell) {
+      return true;
+    }
+
+    const hasValueChange = JSON.stringify(baselineCell.value) !== JSON.stringify(currentCell.value);
+    const hasFormulaChange = baselineCell.type === 'formula' &&
+      currentCell.type === 'formula' &&
+      baselineCell.rawValue !== currentCell.rawValue;
+    const hasTypeChange = baselineCell.type !== currentCell.type;
+
+    return hasValueChange || hasFormulaChange || hasTypeChange;
+  }
+
+  getBlameType(cellName, baselineMap, currentMap) {
+    const baselineCell = baselineMap.get(cellName);
+    const currentCell = currentMap.get(cellName);
+
+    if (!baselineCell && currentCell) {
+      return 'added';
+    }
+    if (baselineCell && !currentCell) {
+      return 'removed';
+    }
+
+    const hasFormulaChange = baselineCell.type === 'formula' &&
+      currentCell.type === 'formula' &&
+      baselineCell.rawValue !== currentCell.rawValue;
+
+    if (hasFormulaChange) {
+      return 'formula_changed';
+    }
+
+    return 'value_changed';
+  }
+
+  findAllBlameSources(changedCellName, baselineMap, currentMap, computeGraph) {
+    const blameSources = [];
+    const visited = new Set();
+
+    const findRootCauses = (cellName, path) => {
+      const currentPath = [...path, cellName];
+
+      if (visited.has(cellName)) {
+        return;
+      }
       visited.add(cellName);
 
       const baselineCell = baselineMap.get(cellName);
       const currentCell = currentMap.get(cellName);
 
       if (!baselineCell || !currentCell) {
-        if (!baselineCell && currentCell) {
-          return { cell: cellName, blameType: 'added', path: [...path, cellName] };
-        }
-        if (baselineCell && !currentCell) {
-          return { cell: cellName, blameType: 'removed', path: [...path, cellName] };
-        }
-        return null;
+        blameSources.push({
+          cell: cellName,
+          blameType: this.getBlameType(cellName, baselineMap, currentMap),
+          path: currentPath
+        });
+        return;
       }
 
-      const hasValueChange = JSON.stringify(baselineCell.value) !== JSON.stringify(currentCell.value);
       const hasFormulaChange = baselineCell.type === 'formula' &&
         currentCell.type === 'formula' &&
         baselineCell.rawValue !== currentCell.rawValue;
       const hasTypeChange = baselineCell.type !== currentCell.type;
 
       if (currentCell.type === 'constant') {
-        if (hasValueChange || hasTypeChange) {
-          return { cell: cellName, blameType: 'value_changed', path: [...path, cellName] };
+        if (this.isCellChanged(cellName, baselineMap, currentMap)) {
+          blameSources.push({
+            cell: cellName,
+            blameType: 'value_changed',
+            path: currentPath
+          });
         }
-        return null;
+        return;
       }
 
-      if (hasFormulaChange) {
-        return { cell: cellName, blameType: 'formula_changed', path: [...path, cellName] };
-      }
-
-      if (hasTypeChange) {
-        return { cell: cellName, blameType: 'value_changed', path: [...path, cellName] };
+      if (hasFormulaChange || hasTypeChange) {
+        blameSources.push({
+          cell: cellName,
+          blameType: this.getBlameType(cellName, baselineMap, currentMap),
+          path: currentPath
+        });
+        return;
       }
 
       const cell = computeGraph.cells.get(cellName);
-      if (!cell || !cell.dependencies) return null;
-
-      path.push(cellName);
-
-      const localDeps = cell.dependencies.filter(d => !d.includes('::'));
-      for (const dep of localDeps) {
-        const result = findUpstream(dep);
-        if (result) return result;
+      if (!cell || !cell.dependencies) {
+        return;
       }
 
-      path.pop();
-      return null;
+      const localDeps = cell.dependencies.filter(d => !d.includes('::'));
+      if (localDeps.length === 0) {
+        if (this.isCellChanged(cellName, baselineMap, currentMap)) {
+          blameSources.push({
+            cell: cellName,
+            blameType: 'value_changed',
+            path: currentPath
+          });
+        }
+        return;
+      }
+
+      for (const dep of localDeps) {
+        findRootCauses(dep, currentPath);
+      }
     };
 
-    path.push(changedCellName);
-    const cell = computeGraph.cells.get(changedCellName);
-    if (cell && cell.dependencies) {
-      const localDeps = cell.dependencies.filter(d => !d.includes('::'));
-      for (const dep of localDeps) {
-        const result = findUpstream(dep);
-        if (result) return result;
-      }
+    const changedCell = computeGraph.cells.get(changedCellName);
+    if (!changedCell) {
+      return [{
+        cell: changedCellName,
+        blameType: 'removed',
+        path: [changedCellName]
+      }];
     }
 
-    return { cell: changedCellName, blameType: 'value_changed', path: [changedCellName] };
+    if (!baselineMap.has(changedCellName)) {
+      return [{
+        cell: changedCellName,
+        blameType: 'added',
+        path: [changedCellName]
+      }];
+    }
+
+    const localDeps = changedCell.dependencies ?
+      changedCell.dependencies.filter(d => !d.includes('::')) : [];
+
+    if (localDeps.length === 0) {
+      return [{
+        cell: changedCellName,
+        blameType: this.getBlameType(changedCellName, baselineMap, currentMap),
+        path: [changedCellName]
+      }];
+    }
+
+    for (const dep of localDeps) {
+      findRootCauses(dep, [changedCellName]);
+    }
+
+    if (blameSources.length === 0) {
+      return [{
+        cell: changedCellName,
+        blameType: this.getBlameType(changedCellName, baselineMap, currentMap),
+        path: [changedCellName]
+      }];
+    }
+
+    return blameSources;
   }
 
   blame(baselineId, computeGraph, tolerance = DEFAULT_TOLERANCE) {
@@ -307,13 +397,15 @@ class BaselineEngine {
 
     const blameResults = [];
     for (const detail of changedDetails) {
-      const blame = this.findBlameSource(detail.name, baselineMap, currentMap, computeGraph);
-      blameResults.push({
-        cell: detail.name,
-        blameSource: blame.cell,
-        blameType: blame.blameType,
-        path: blame.path
-      });
+      const blames = this.findAllBlameSources(detail.name, baselineMap, currentMap, computeGraph);
+      for (const blame of blames) {
+        blameResults.push({
+          cell: detail.name,
+          blameSource: blame.cell,
+          blameType: blame.blameType,
+          path: [...blame.path].reverse()
+        });
+      }
     }
 
     return blameResults;
