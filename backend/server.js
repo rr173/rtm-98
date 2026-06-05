@@ -8,7 +8,8 @@ const { SnapshotManager } = require('./snapshot-manager');
 const { AuditEngine } = require('./audit-engine');
 const { NamespaceManager } = require('./namespace-manager');
 const { TemplateManager } = require('./template-manager');
-const { demoCells, demoNamespaces } = require('./demo-data');
+const { demoCells, demoNamespaces, demoSandboxScript } = require('./demo-data');
+const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./sandbox-engine');
 
 const app = express();
 const server = http.createServer(app);
@@ -853,6 +854,34 @@ function loadDemoTemplate() {
     console.error('演示模板创建失败:', e.message);
   }
 }
+
+app.get('/api/sandbox/demo', (req, res) => {
+  res.json(demoSandboxScript);
+});
+
+app.get('/api/sandbox/status', (req, res) => {
+  res.json({
+    availableSlots: getAvailableSlots(),
+    maxConcurrent: MAX_CONCURRENT_SANDBOXES
+  });
+});
+
+app.post('/api/sandbox/run', requireNamespace, async (req, res) => {
+  const { instructions } = req.body;
+  const graph = getComputeGraph(req);
+
+  if (!Array.isArray(instructions)) {
+    return res.status(400).json({ error: 'instructions 必须是数组' });
+  }
+
+  try {
+    const result = await runSandbox(graph, instructions);
+    res.json(result);
+  } catch (e) {
+    const statusCode = e.statusCode || 400;
+    res.status(statusCode).json({ error: e.message });
+  }
+});
 
 app.use((err, req, res, next) => {
   console.error('服务器错误:', err);

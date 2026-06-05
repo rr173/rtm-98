@@ -31,4 +31,44 @@ const demoNamespaces = [
   }
 ];
 
-module.exports = { demoCells, demoNamespaces };
+const demoSandboxScript = {
+  description: '沙箱演示脚本: 修改单价→观察下游联动→删除折扣→观察错误传播',
+  instructions: [
+    {
+      op: 'update',
+      name: 'unit_price',
+      type: 'constant',
+      value: 150,
+      comment: '将单价从100改为150，观察小计、折扣、总价等的变化'
+    },
+    {
+      op: 'update',
+      name: 'quantity',
+      type: 'constant',
+      value: 10,
+      condition: 'unit_price > 120',
+      comment: '条件执行: 只有当unit_price > 120时，才将数量改为10'
+    },
+    {
+      op: 'delete',
+      name: 'discount_rate',
+      comment: '删除折扣率，观察依赖它的单元格会报错'
+    },
+    {
+      op: 'create',
+      name: 'shipping_fee',
+      type: 'constant',
+      value: 20,
+      comment: '新增运费单元格'
+    },
+    {
+      op: 'create',
+      name: 'grand_total',
+      type: 'formula',
+      value: 'final + shipping_fee',
+      comment: '新增总计公式: final + shipping_fee'
+    }
+  ]
+};
+
+module.exports = { demoCells, demoNamespaces, demoSandboxScript };
