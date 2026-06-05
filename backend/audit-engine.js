@@ -29,7 +29,7 @@ class AuditEngine {
     if (isNaN(seq)) return [];
     const cellLower = cellName.toLowerCase();
     return this.logs.filter(l =>
-      l.seq > seq && l.cellName.toLowerCase() === cellLower
+      l.seq > seq && l.cellName.toLowerCase() === cellLower && l.type !== 'undo'
     );
   }
 

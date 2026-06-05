@@ -727,7 +727,8 @@ app.post('/api/audit/replay', requireNamespace, (req, res) => {
   }
 });
 
-function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, operator, force = true) {
+function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, operator, force = true, options = {}) {
+  const { emitEvents = true, runRules = true } = options;
   const log = audit.getBySeq(seq);
   if (!log) {
     return { success: false, seq, error: `日志 seq=${seq} 不存在` };
@@ -779,18 +780,20 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
         return { success: false, seq, error: e.message };
       }
 
-      if (namespace) {
-        wsManager.broadcastCellDeletedInNamespace(namespace, cellName);
-        nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
-      } else {
-        wsManager.broadcastCellDeleted(cellName);
+      if (emitEvents) {
+        if (namespace) {
+          wsManager.broadcastCellDeletedInNamespace(namespace, cellName);
+          nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+        } else {
+          wsManager.broadcastCellDeleted(cellName);
+        }
       }
 
       const afterDef = null;
       const beforeDefForLog = newDef ? { type: newDef.type, rawValue: newDef.rawValue } : null;
       audit.append('undo', operator, cellName, beforeDefForLog, afterDef, { undoTarget: log.seq });
 
-      if (rules) {
+      if (rules && runRules) {
         rules.onCellDeleted(cellName);
       }
 
@@ -799,6 +802,7 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
         seq,
         action: 'delete',
         cell: cellName,
+        changed: true,
         conflict: hasConflict,
         laterChanges: hasConflict ? laterChanges.map(l => ({
           seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
@@ -812,6 +816,7 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
         seq,
         action: 'noop',
         cell: cellName,
+        changed: false,
         note: '单元格原本就不存在',
         conflict: hasConflict,
         laterChanges: hasConflict ? laterChanges.map(l => ({
@@ -828,17 +833,19 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
     try {
       const { cell, changes } = graph.createCell(cellName, targetType, targetValue);
 
-      if (namespace) {
-        wsManager.broadcastChangesToNamespace(namespace, changes);
-        nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
-      } else {
-        wsManager.broadcastChanges(changes);
+      if (emitEvents) {
+        if (namespace) {
+          wsManager.broadcastChangesToNamespace(namespace, changes);
+          nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+        } else {
+          wsManager.broadcastChanges(changes);
+        }
       }
 
       const beforeDefForLog = null;
       audit.append('undo', operator, cellName, beforeDefForLog, { type: targetType, rawValue: targetValue }, { undoTarget: log.seq });
 
-      if (rules) {
+      if (rules && runRules) {
         rules.checkRules(graph, namespace);
       }
 
@@ -847,6 +854,7 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
         seq,
         action: 'recreate',
         cell: cellName,
+        changed: true,
         conflict: hasConflict,
         laterChanges: hasConflict ? laterChanges.map(l => ({
           seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
@@ -861,16 +869,18 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
     const beforeDefForLog = { type: existingCell.type, rawValue: existingCell.rawValue };
     const { cell, changes } = graph.updateCell(cellName, targetType, targetValue);
 
-    if (namespace) {
-      wsManager.broadcastChangesToNamespace(namespace, changes);
-      nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
-    } else {
-      wsManager.broadcastChanges(changes);
+    if (emitEvents) {
+      if (namespace) {
+        wsManager.broadcastChangesToNamespace(namespace, changes);
+        nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+      } else {
+        wsManager.broadcastChanges(changes);
+      }
     }
 
     audit.append('undo', operator, cellName, beforeDefForLog, { type: targetType, rawValue: targetValue }, { undoTarget: log.seq });
 
-    if (rules) {
+    if (rules && runRules) {
       rules.checkRules(graph, namespace);
     }
 
@@ -879,6 +889,7 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
       seq,
       action: 'restore',
       cell: cellName,
+      changed: true,
       conflict: hasConflict,
       laterChanges: hasConflict ? laterChanges.map(l => ({
         seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
@@ -902,16 +913,21 @@ app.post('/api/audit/undo/:seq', requireNamespace, (req, res) => {
     return res.status(400).json({ error: '无效的 seq 参数' });
   }
 
-  const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
+  scheduleEngine.stop();
+  try {
+    const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
 
-  if (!result.success) {
-    if (result.conflict) {
-      return res.status(409).json(result);
+    if (!result.success) {
+      if (result.conflict) {
+        return res.status(409).json(result);
+      }
+      return res.status(400).json(result);
     }
-    return res.status(400).json(result);
-  }
 
-  res.json(result);
+    res.json(result);
+  } finally {
+    scheduleEngine.start();
+  }
 });
 
 app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
@@ -938,32 +954,56 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
     seqs.push(s);
   }
 
+  scheduleEngine.stop();
+
   const originalSnapshot = graph.snapshot();
   const originalLogsLength = audit.logs.length;
   const originalNextSeq = audit.nextSeq;
 
   const results = [];
+  const changedCells = new Set();
   let failed = false;
   let failureError = null;
 
-  for (const seq of seqs) {
-    const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
-    results.push(result);
-    if (!result.success) {
-      failed = true;
-      failureError = result.error || `撤销 seq=${seq} 失败`;
-      break;
+  try {
+    for (const seq of seqs) {
+      const result = performUndo(
+        seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force,
+        { emitEvents: false, runRules: false }
+      );
+      results.push(result);
+      if (!result.success) {
+        failed = true;
+        failureError = result.error || `撤销 seq=${seq} 失败`;
+        break;
+      }
+      if (result.changed) {
+        changedCells.add(result.cell);
+      }
     }
-  }
 
-  if (failed) {
-    try {
-      graph.restore(originalSnapshot);
-    } catch (restoreErr) {
-      console.error('批量撤销回滚 graph 失败:', restoreErr.message);
+    if (failed) {
+      try {
+        graph.restore(originalSnapshot);
+      } catch (restoreErr) {
+        console.error('批量撤销回滚 graph 失败:', restoreErr.message);
+      }
+      audit.logs.length = originalLogsLength;
+      audit.nextSeq = originalNextSeq;
+
+      if (namespace) {
+        wsManager.broadcastRestoreToNamespace(namespace);
+      } else {
+        wsManager.broadcastRestore();
+      }
+
+      return res.status(400).json({
+        success: false,
+        error: failureError,
+        rolledBack: true,
+        partialResults: results
+      });
     }
-    audit.logs.length = originalLogsLength;
-    audit.nextSeq = originalNextSeq;
 
     if (namespace) {
       wsManager.broadcastRestoreToNamespace(namespace);
@@ -971,19 +1011,22 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
       wsManager.broadcastRestore();
     }
 
-    return res.status(400).json({
-      success: false,
-      error: failureError,
-      rolledBack: true,
-      partialResults: results
-    });
-  }
+    if (changedCells.size > 0) {
+      nsManager.propagateCrossNamespaceChange(namespace, Array.from(changedCells), wsManager);
+    }
 
-  res.json({
-    success: true,
-    total: seqs.length,
-    results
-  });
+    if (rules) {
+      rules.checkRules(graph, namespace);
+    }
+
+    res.json({
+      success: true,
+      total: seqs.length,
+      results
+    });
+  } finally {
+    scheduleEngine.start();
+  }
 });
 
 app.post('/api/namespaces', (req, res) => {
