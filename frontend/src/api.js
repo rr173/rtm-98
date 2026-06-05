@@ -162,3 +162,61 @@ export async function setPerfThreshold(thresholdMs) {
   if (!res.ok) throw new Error(data.error);
   return data.thresholdMs;
 }
+
+export async function fetchRules() {
+  const res = await fetch(`${API_BASE}/rules`);
+  const data = await res.json();
+  return data.rules || [];
+}
+
+export async function fetchRule(id) {
+  const res = await fetch(`${API_BASE}/rules/${id}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function createRule(params) {
+  const res = await fetch(`${API_BASE}/rules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function deleteRule(id) {
+  const res = await fetch(`${API_BASE}/rules/${id}`, {
+    method: 'DELETE'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function enableRule(id) {
+  const res = await fetch(`${API_BASE}/rules/${id}/enable`, {
+    method: 'PUT'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function disableRule(id) {
+  const res = await fetch(`${API_BASE}/rules/${id}/disable`, {
+    method: 'PUT'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function fetchRuleHistory(id) {
+  const res = await fetch(`${API_BASE}/rules/${id}/history`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.history || [];
+}

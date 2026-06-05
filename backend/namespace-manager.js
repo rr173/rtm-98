@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { ComputeGraph } = require('./compute-graph');
 const { SnapshotManager } = require('./snapshot-manager');
 const { AuditEngine } = require('./audit-engine');
+const { RuleEngine } = require('./rule-engine');
 
 const MAX_NAMESPACES = 50;
 const MAX_CELLS_PER_NAMESPACE = 500;
@@ -12,10 +13,18 @@ class NamespaceManager {
     this.adminKey = adminKey || 'admin-secret-key';
     this.namespaces = new Map();
     this.perfAlertCallback = null;
+    this.wsManager = null;
   }
 
   setPerfAlertCallback(callback) {
     this.perfAlertCallback = callback;
+  }
+
+  setWebSocketManager(wsManager) {
+    this.wsManager = wsManager;
+    for (const ns of this.namespaces.values()) {
+      ns.ruleEngine.setWebSocketManager(wsManager);
+    }
   }
 
   generateKey() {
@@ -46,6 +55,7 @@ class NamespaceManager {
     const computeGraph = new ComputeGraph(MAX_CELLS_PER_NAMESPACE);
     const snapshotManager = new SnapshotManager();
     const auditEngine = new AuditEngine();
+    const ruleEngine = new RuleEngine();
 
     const crossNamespaceResolver = (ns, cellName) => {
       return this.resolveCrossNamespaceRef(name, ns, cellName);
@@ -64,6 +74,7 @@ class NamespaceManager {
       computeGraph,
       snapshotManager,
       auditEngine,
+      ruleEngine,
       publishedCells: new Set(),
       createdAt: Date.now()
     };
@@ -74,6 +85,10 @@ class NamespaceManager {
       computeGraph.getPerfTracker().setOnAlertCallback((alert) => {
         this.perfAlertCallback(alert, name);
       });
+    }
+
+    if (this.wsManager) {
+      ns.ruleEngine.setWebSocketManager(this.wsManager);
     }
 
     return { name, key, createdAt: ns.createdAt };

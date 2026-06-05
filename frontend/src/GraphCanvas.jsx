@@ -23,7 +23,8 @@ export default function GraphCanvas({
   flashingCells,
   diffCells = new Set(),
   heatmapEnabled = false,
-  cellPerfData = new Map()
+  cellPerfData = new Map(),
+  ruleAlerts = new Map()
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -205,8 +206,31 @@ export default function GraphCanvas({
     for (const node of layout.getNodes()) {
       const cell = getCell(node.name);
       drawNode(ctx, node, cell);
+
+      const alert = ruleAlerts.get(node.name);
+      if (alert) {
+        const alertX = node.x + NODE_WIDTH / 2;
+        const alertY = node.y - NODE_HEIGHT / 2 - 10;
+        
+        ctx.save();
+        ctx.shadowColor = 'rgba(239, 68, 68, 0.5)';
+        ctx.shadowBlur = 10;
+        
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.roundRect(alertX, alertY - 15, 180, 32, 6);
+        ctx.fill();
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 11px system-ui, -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('⚠️ ' + alert.message.substring(0, 20), alertX + 90, alertY);
+        
+        ctx.restore();
+      }
     }
-  }, [dimensions, drawArrow, drawNode, getCell]);
+  }, [dimensions, drawArrow, drawNode, getCell, ruleAlerts]);
 
   const animate = useCallback(() => {
     const layout = layoutRef.current;
@@ -215,12 +239,12 @@ export default function GraphCanvas({
     const running = layout.step();
     render();
 
-    if (running || flashingCells.size > 0 || diffCells.size > 0 || heatmapEnabled) {
+    if (running || flashingCells.size > 0 || diffCells.size > 0 || heatmapEnabled || ruleAlerts.size > 0) {
       animationRef.current = requestAnimationFrame(animate);
     } else {
       animationRef.current = null;
     }
-  }, [render, flashingCells.size, diffCells.size, heatmapEnabled]);
+  }, [render, flashingCells.size, diffCells.size, heatmapEnabled, ruleAlerts.size]);
 
   useEffect(() => {
     if (!layoutRef.current) {

@@ -3,6 +3,7 @@ import GraphCanvas from './GraphCanvas.jsx';
 import EditModal from './EditModal.jsx';
 import DetailPanel from './DetailPanel.jsx';
 import SnapshotPanel from './SnapshotPanel.jsx';
+import RulePanel from './RulePanel.jsx';
 import { createWebSocketConnection } from './websocket.js';
 import {
   fetchCells,
@@ -35,6 +36,8 @@ export default function App() {
   const [perfAlert, setPerfAlert] = useState(null);
   const [heatmapEnabled, setHeatmapEnabled] = useState(false);
   const [cellPerfData, setCellPerfData] = useState(new Map());
+  const [showRulePanel, setShowRulePanel] = useState(false);
+  const [ruleAlerts, setRuleAlerts] = useState(new Map());
   const wsRef = useRef(null);
   const clientIdRef = useRef(null);
 
@@ -133,6 +136,24 @@ export default function App() {
 
       case 'perf_alert':
         showPerfAlert(message);
+        break;
+
+      case 'rule_alert':
+        setRuleAlerts(prev => {
+          const next = new Map(prev);
+          next.set(message.cellName, {
+            message: message.message,
+            timestamp: message.timestamp
+          });
+          return next;
+        });
+        setTimeout(() => {
+          setRuleAlerts(prev => {
+            const next = new Map(prev);
+            next.delete(message.cellName);
+            return next;
+          });
+        }, 3000);
         break;
 
       default:
@@ -376,6 +397,7 @@ export default function App() {
           </button>
           <button className="btn-secondary" onClick={handleCreateSnapshot} title="创建快照">📸</button>
           <button className="btn-secondary" onClick={() => setShowSnapshotPanel(true)} title="快照管理">🕐</button>
+          <button className="btn-secondary" onClick={() => setShowRulePanel(true)} title="规则管理">⚡</button>
           <button className="btn-secondary" onClick={handleRefresh}>刷新</button>
           <button className="btn-secondary" onClick={handleExport}>导出</button>
           <button className="btn-secondary" onClick={handleImport}>导入</button>
@@ -395,6 +417,7 @@ export default function App() {
             diffCells={diffCells}
             heatmapEnabled={heatmapEnabled}
             cellPerfData={cellPerfData}
+            ruleAlerts={ruleAlerts}
           />
         </div>
         <DetailPanel
@@ -468,6 +491,13 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <RulePanel
+        isOpen={showRulePanel}
+        onClose={() => setShowRulePanel(false)}
+        cells={cells}
+        showNotification={showNotification}
+      />
 
       {showModal && (
         <EditModal

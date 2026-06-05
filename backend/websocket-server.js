@@ -195,6 +195,41 @@ class WebSocketManager {
       }
     }
   }
+
+  broadcastRuleAlert(alertData) {
+    const message = JSON.stringify({
+      type: 'rule_alert',
+      ruleId: alertData.ruleId,
+      cellName: alertData.cellName,
+      message: alertData.message,
+      currentValue: alertData.currentValue,
+      timestamp: alertData.timestamp
+    });
+
+    for (const info of this.clients.values()) {
+      if (!info.namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastRuleAlertToNamespace(namespace, alertData) {
+    const message = JSON.stringify({
+      type: 'rule_alert',
+      ruleId: alertData.ruleId,
+      cellName: alertData.cellName,
+      message: alertData.message,
+      currentValue: alertData.currentValue,
+      timestamp: alertData.timestamp,
+      namespace
+    });
+
+    for (const info of this.clients.values()) {
+      if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
 }
 
 module.exports = { WebSocketManager };

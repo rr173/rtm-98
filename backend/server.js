@@ -10,6 +10,7 @@ const { NamespaceManager } = require('./namespace-manager');
 const { TemplateManager } = require('./template-manager');
 const { demoCells, demoNamespaces, demoSandboxScript } = require('./demo-data');
 const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./sandbox-engine');
+const { RuleEngine } = require('./rule-engine');
 const { globalPerfTracker } = require('./perf-tracker');
 
 const app = express();
@@ -27,7 +28,10 @@ const snapshotManager = new SnapshotManager();
 const auditEngine = new AuditEngine();
 const nsManager = new NamespaceManager(ADMIN_KEY);
 const templateManager = new TemplateManager(ADMIN_KEY);
+const ruleEngine = new RuleEngine();
+ruleEngine.setWebSocketManager(wsManager);
 wsManager.setNamespaceManager(nsManager);
+nsManager.setWebSocketManager(wsManager);
 wsManager.attach(server);
 
 computeGraph.getPerfTracker().setOnAlertCallback((alert) => {
@@ -203,6 +207,13 @@ function getPerfTracker(req) {
   return computeGraph.getPerfTracker();
 }
 
+function getRuleEngine(req) {
+  if (req.namespace && req.nsInfo) {
+    return req.nsInfo.ruleEngine;
+  }
+  return ruleEngine;
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', onlineCount: wsManager.getOnlineCount() });
 });
@@ -330,6 +341,11 @@ app.post('/api/cells', requireNamespace, (req, res) => {
       wsManager.broadcastChanges(changes);
     }
 
+    const rules = getRuleEngine(req);
+    if (changes.length > 0) {
+      rules.checkRules(graph, req.namespace);
+    }
+
     audit.append('create', operator, name, null, { type, rawValue: value });
     res.json({ cell, changes });
   } catch (e) {
@@ -363,6 +379,9 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
         wsManager.broadcastCellDeleted(name);
       }
 
+      const rules = getRuleEngine(req);
+      rules.onCellRenamed(name, renameTo);
+
       audit.append('delete', operator, name, oldDef, null);
       audit.append('create', operator, renameTo, null, { type: cell.type, rawValue: cell.rawValue });
 
@@ -393,6 +412,11 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
       wsManager.broadcastChanges(changes);
     }
 
+    const rules = getRuleEngine(req);
+    if (changes.length > 0) {
+      rules.checkRules(graph, req.namespace);
+    }
+
     audit.append('update', operator, name, oldDef, { type, rawValue: value });
     res.json({ cell, changes });
   } catch (e) {
@@ -420,6 +444,9 @@ app.delete('/api/cells/:name', requireNamespace, (req, res) => {
     } else {
       wsManager.broadcastCellDeleted(req.params.name);
     }
+
+    const rules = getRuleEngine(req);
+    rules.onCellDeleted(req.params.name);
 
     audit.append('delete', operator, req.params.name, oldDef, null);
     res.json({ success: true, deleted: req.params.name });
@@ -476,6 +503,11 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
         const opType = !oldDef ? 'create' : !newDef ? 'delete' : 'update';
         audit.append(opType, operator, name, oldDef, newDef);
       }
+    }
+
+    const rules = getRuleEngine(req);
+    if (changes.length > 0) {
+      rules.checkRules(graph, req.namespace);
     }
 
     res.json({ success: true, changes, errors });
@@ -613,6 +645,9 @@ app.post('/api/snapshots/:id/restore', requireNamespace, (req, res) => {
         audit.append('restore', operator, name, oldDef, newDef);
       }
     }
+
+    const rules = getRuleEngine(req);
+    rules.checkRules(graph, req.namespace);
 
     res.json({
       success: true,
@@ -928,6 +963,78 @@ app.post('/api/sandbox/run', requireNamespace, async (req, res) => {
     const statusCode = e.statusCode || 400;
     res.status(statusCode).json({ error: e.message });
   }
+});
+
+app.post('/api/rules', requireNamespace, (req, res) => {
+  const { targetCell, condition, actionType, actionParams, cooldown } = req.body;
+  const graph = getComputeGraph(req);
+  const rules = getRuleEngine(req);
+
+  try {
+    const rule = rules.createRule(graph, {
+      targetCell,
+      condition,
+      actionType,
+      actionParams,
+      cooldown
+    });
+    res.json(rule);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/rules', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  res.json({ rules: rules.listRules() });
+});
+
+app.get('/api/rules/:id', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  const rule = rules.getRule(req.params.id);
+  if (!rule) {
+    return res.status(404).json({ error: `规则 ${req.params.id} 不存在` });
+  }
+  res.json(rule);
+});
+
+app.delete('/api/rules/:id', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  try {
+    const result = rules.deleteRule(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+app.put('/api/rules/:id/enable', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  try {
+    const result = rules.enableRule(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+app.put('/api/rules/:id/disable', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  try {
+    const result = rules.disableRule(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+app.get('/api/rules/:id/history', requireNamespace, (req, res) => {
+  const rules = getRuleEngine(req);
+  const history = rules.getRuleHistory(req.params.id);
+  if (!history) {
+    return res.status(404).json({ error: `规则 ${req.params.id} 不存在` });
+  }
+  res.json({ history });
 });
 
 app.use((err, req, res, next) => {
