@@ -5,6 +5,7 @@ import DetailPanel from './DetailPanel.jsx';
 import SnapshotPanel from './SnapshotPanel.jsx';
 import RulePanel from './RulePanel.jsx';
 import BaselinePanel from './BaselinePanel.jsx';
+import SchedulePanel from './SchedulePanel.jsx';
 import { createWebSocketConnection } from './websocket.js';
 import {
   fetchCells,
@@ -42,6 +43,8 @@ export default function App() {
   const [showBaselinePanel, setShowBaselinePanel] = useState(false);
   const [baselineRefresh, setBaselineRefresh] = useState(0);
   const [highlightedPath, setHighlightedPath] = useState(new Set());
+  const [showSchedulePanel, setShowSchedulePanel] = useState(false);
+  const [scheduleAlerts, setScheduleAlerts] = useState([]);
   const wsRef = useRef(null);
   const clientIdRef = useRef(null);
 
@@ -158,6 +161,25 @@ export default function App() {
             return next;
           });
         }, 3000);
+        break;
+
+      case 'schedule_executed':
+        showNotification(
+          `调度任务 "${message.name}" 执行完成: ${message.status}`,
+          message.status === 'success' ? 'success' : message.status === 'partial_success' ? 'warning' : 'error'
+        );
+        break;
+
+      case 'schedule_alert':
+        setScheduleAlerts(prev => [...prev.slice(-4), {
+          id: Date.now(),
+          scheduleId: message.scheduleId,
+          name: message.name,
+          message: message.message,
+          baselineId: message.baselineId,
+          diff: message.diff
+        }]);
+        showNotification(`⚠️ 调度告警: ${message.name} - ${message.message}`, 'error');
         break;
 
       default:
@@ -411,6 +433,7 @@ export default function App() {
           <button className="btn-secondary" onClick={() => setShowSnapshotPanel(true)} title="快照管理">🕐</button>
           <button className="btn-secondary" onClick={() => setShowRulePanel(true)} title="规则管理">⚡</button>
           <button className="btn-secondary baseline-btn" onClick={() => setShowBaselinePanel(true)} title="基线管理 & 回归检测">✓</button>
+          <button className="btn-secondary schedule-btn" onClick={() => setShowSchedulePanel(true)} title="定时调度 & 自动化流水线">⏰</button>
           <button className="btn-secondary" onClick={handleRefresh}>刷新</button>
           <button className="btn-secondary" onClick={handleExport}>导出</button>
           <button className="btn-secondary" onClick={handleImport}>导入</button>
@@ -522,6 +545,12 @@ export default function App() {
         onHighlightPath={handleHighlightPath}
         showNotification={showNotification}
         refreshTrigger={baselineRefresh}
+      />
+
+      <SchedulePanel
+        isOpen={showSchedulePanel}
+        onClose={() => setShowSchedulePanel(false)}
+        showNotification={showNotification}
       />
 
       {showModal && (

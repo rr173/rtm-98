@@ -286,3 +286,66 @@ export async function blameBaseline(id, tolerance) {
   if (!res.ok) throw new Error(data.error);
   return data;
 }
+
+export async function createSchedule(params) {
+  const res = await fetch(`${API_BASE}/schedules`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function fetchSchedules() {
+  const res = await fetch(`${API_BASE}/schedules`);
+  const data = await res.json();
+  return data.schedules || [];
+}
+
+export async function fetchSchedule(id) {
+  const res = await fetch(`${API_BASE}/schedules/${id}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function fetchScheduleHistory(id) {
+  const res = await fetch(`${API_BASE}/schedules/${id}/history`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.history || [];
+}
+
+export async function deleteSchedule(id) {
+  const res = await fetch(`${API_BASE}/schedules/${id}`, {
+    method: 'DELETE'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function pauseSchedule(id) {
+  const res = await fetch(`${API_BASE}/schedules/${id}/pause`, {
+    method: 'PUT'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function resumeSchedule(id) {
+  const res = await fetch(`${API_BASE}/schedules/${id}/resume`, {
+    method: 'PUT'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function validateCron(expression) {
+  const res = await fetch(`${API_BASE}/schedules/cron/validate?expression=${encodeURIComponent(expression)}`);
+  return res.json();
+}

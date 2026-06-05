@@ -13,6 +13,7 @@ const { demoCells, demoNamespaces, demoSandboxScript } = require('./demo-data');
 const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./sandbox-engine');
 const { RuleEngine } = require('./rule-engine');
 const { globalPerfTracker } = require('./perf-tracker');
+const { ScheduleEngine, MAX_SCHEDULES } = require('./schedule-engine');
 
 const app = express();
 const server = http.createServer(app);
@@ -31,10 +32,19 @@ const nsManager = new NamespaceManager(ADMIN_KEY);
 const templateManager = new TemplateManager(ADMIN_KEY);
 const ruleEngine = new RuleEngine();
 const baselineEngine = new BaselineEngine();
+const scheduleEngine = new ScheduleEngine();
 ruleEngine.setWebSocketManager(wsManager);
 wsManager.setNamespaceManager(nsManager);
 nsManager.setWebSocketManager(wsManager);
 wsManager.attach(server);
+scheduleEngine.setWebSocketManager(wsManager);
+scheduleEngine.setContextProvider(null, () => ({
+  computeGraph,
+  snapshotManager,
+  baselineEngine,
+  wsManager,
+  namespace: null
+}));
 
 computeGraph.getPerfTracker().setOnAlertCallback((alert) => {
   wsManager.broadcastPerfAlert(alert, null);
@@ -221,6 +231,10 @@ function getBaselineEngine(req) {
     return req.nsInfo.baselineEngine;
   }
   return baselineEngine;
+}
+
+function getScheduleEngine(req) {
+  return scheduleEngine;
 }
 
 app.get('/api/health', (req, res) => {
@@ -1136,6 +1150,96 @@ app.post('/api/baselines/:id/blame', requireNamespace, (req, res) => {
   }
 });
 
+app.post('/api/schedules', requireNamespace, (req, res) => {
+  const { name, cron, enabled, actions } = req.body;
+  const scheduleEngine = getScheduleEngine(req);
+
+  if (!name) {
+    return res.status(400).json({ error: '缺少必要参数: name' });
+  }
+  if (!cron) {
+    return res.status(400).json({ error: '缺少必要参数: cron' });
+  }
+  if (!Array.isArray(actions)) {
+    return res.status(400).json({ error: 'actions 必须是数组' });
+  }
+
+  try {
+    const schedule = scheduleEngine.createSchedule({
+      name,
+      cron,
+      enabled: enabled !== undefined ? enabled : true,
+      actions,
+      namespace: req.namespace || null
+    });
+    res.json(schedule);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/schedules', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const schedules = scheduleEngine.getSchedules(req.namespace || null);
+  res.json({ schedules });
+});
+
+app.get('/api/schedules/:id', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const schedule = scheduleEngine.getSchedule(req.params.id, req.namespace || null);
+  if (!schedule) {
+    return res.status(404).json({ error: '调度任务不存在' });
+  }
+  res.json(schedule);
+});
+
+app.get('/api/schedules/:id/history', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const result = scheduleEngine.getHistory(req.params.id, req.namespace || null);
+  if (!result) {
+    return res.status(404).json({ error: '调度任务不存在' });
+  }
+  res.json(result);
+});
+
+app.delete('/api/schedules/:id', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const deleted = scheduleEngine.deleteSchedule(req.params.id, req.namespace || null);
+  if (!deleted) {
+    return res.status(404).json({ error: '调度任务不存在' });
+  }
+  res.json({ success: true });
+});
+
+app.put('/api/schedules/:id/pause', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const result = scheduleEngine.pauseSchedule(req.params.id, req.namespace || null);
+  if (!result) {
+    return res.status(404).json({ error: '调度任务不存在' });
+  }
+  res.json(result);
+});
+
+app.put('/api/schedules/:id/resume', requireNamespace, (req, res) => {
+  const scheduleEngine = getScheduleEngine(req);
+  const result = scheduleEngine.resumeSchedule(req.params.id, req.namespace || null);
+  if (!result) {
+    return res.status(404).json({ error: '调度任务不存在' });
+  }
+  res.json(result);
+});
+
+app.get('/api/schedules/cron/validate', (req, res) => {
+  const { CronParser } = require('./cron-parser');
+  const cronParser = new CronParser();
+  const { expression } = req.query;
+  if (!expression) {
+    return res.status(400).json({ error: '缺少 expression 参数' });
+  }
+  const result = cronParser.validate(expression);
+  res.json(result);
+});
+
 app.use((err, req, res, next) => {
   console.error('服务器错误:', err);
   res.status(500).json({ error: '服务器内部错误' });
@@ -1157,6 +1261,42 @@ function loadDemoBaseline() {
 
 loadDemoBaseline();
 
+function loadDemoSchedule() {
+  console.log('正在创建演示调度...');
+  try {
+    const demoSchedule = scheduleEngine.createSchedule({
+      name: '演示: 定时更新单价并检测基线',
+      cron: '*/15 * * * * *',
+      enabled: true,
+      actions: [
+        {
+          type: 'set_value',
+          cell: 'unit_price',
+          value: { random: true, min: 50, max: 200 }
+        },
+        {
+          type: 'snapshot',
+          label: 'auto-${timestamp}'
+        },
+        {
+          type: 'check_baseline',
+          baselineId: 1
+        }
+      ],
+      namespace: null
+    });
+    console.log(`演示调度已创建，ID: ${demoSchedule.id}`);
+    console.log(`  - Cron: ${demoSchedule.cron} (每15秒执行一次)`);
+    console.log(`  - 操作: 随机修改unit_price -> 拍快照 -> 基线检测`);
+  } catch (e) {
+    console.error('演示调度创建失败:', e.message);
+  }
+}
+
+loadDemoSchedule();
+scheduleEngine.start();
+console.log('调度引擎已启动');
+
 server.listen(PORT, () => {
   console.log(`表达式求值沙盘后端已启动`);
   console.log(`HTTP 服务器: http://localhost:${PORT}`);
@@ -1165,5 +1305,6 @@ server.listen(PORT, () => {
   console.log(`演示命名空间已加载: ${demoNamespaces.length} 个`);
   console.log(`模板市场已启用 (最多 ${templateManager.constructor.MAX_TEMPLATES || 100} 个模板)`);
   console.log(`基线回归引擎已启用 (最多 ${baselineEngine.constructor.MAX_BASELINES || 30} 条基线)`);
+  console.log(`定时调度引擎已启用 (最多 ${MAX_SCHEDULES} 个调度任务)`);
   console.log(`管理员密钥已配置 (ADMIN_KEY 环境变量${ADMIN_KEY === 'admin-secret-key' ? '，使用默认值' : ''})`);
 });

@@ -230,6 +230,78 @@ class WebSocketManager {
       }
     }
   }
+
+  broadcastScheduleExecution(executionData) {
+    const message = JSON.stringify({
+      type: 'schedule_executed',
+      scheduleId: executionData.scheduleId,
+      name: executionData.name,
+      status: executionData.status,
+      timestamp: executionData.timestamp,
+      actionResults: executionData.actionResults
+    });
+
+    for (const info of this.clients.values()) {
+      if (!info.namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastScheduleExecutionToNamespace(namespace, executionData) {
+    const message = JSON.stringify({
+      type: 'schedule_executed',
+      scheduleId: executionData.scheduleId,
+      name: executionData.name,
+      status: executionData.status,
+      timestamp: executionData.timestamp,
+      actionResults: executionData.actionResults,
+      namespace
+    });
+
+    for (const info of this.clients.values()) {
+      if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastScheduleAlert(alertData) {
+    const message = JSON.stringify({
+      type: 'schedule_alert',
+      scheduleId: alertData.scheduleId,
+      name: alertData.name,
+      message: alertData.message,
+      baselineId: alertData.baselineId,
+      diff: alertData.diff,
+      timestamp: alertData.timestamp
+    });
+
+    for (const info of this.clients.values()) {
+      if (!info.namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastScheduleAlertToNamespace(namespace, alertData) {
+    const message = JSON.stringify({
+      type: 'schedule_alert',
+      scheduleId: alertData.scheduleId,
+      name: alertData.name,
+      message: alertData.message,
+      baselineId: alertData.baselineId,
+      diff: alertData.diff,
+      timestamp: alertData.timestamp,
+      namespace
+    });
+
+    for (const info of this.clients.values()) {
+      if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
 }
 
 module.exports = { WebSocketManager };
