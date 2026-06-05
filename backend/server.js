@@ -727,6 +727,265 @@ app.post('/api/audit/replay', requireNamespace, (req, res) => {
   }
 });
 
+function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, operator, force = true) {
+  const log = audit.getBySeq(seq);
+  if (!log) {
+    return { success: false, seq, error: `日志 seq=${seq} 不存在` };
+  }
+
+  if (log.type === 'undo') {
+    return { success: false, seq, error: '不能撤销一条撤销操作' };
+  }
+
+  const laterChanges = audit.getLaterChanges(log.cellName, log.seq);
+  const hasConflict = laterChanges.length > 0;
+
+  if (hasConflict && !force) {
+    return {
+      success: false,
+      seq,
+      conflict: true,
+      laterChanges: laterChanges.map(l => ({
+        seq: l.seq,
+        type: l.type,
+        operator: l.operator,
+        timestamp: l.timestamp
+      })),
+      error: '存在后续修改，撤销被拒绝（设置 force:true 可强制执行）'
+    };
+  }
+
+  const cellName = log.cellName;
+  const existingCell = graph.getCell(cellName);
+  const oldDef = log.oldDef;
+  const newDef = log.newDef;
+
+  const isCreateOp = oldDef === null;
+
+  if (isCreateOp) {
+    if (existingCell) {
+      const downstream = graph.getDownstream(cellName);
+      if (downstream.length > 0) {
+        return {
+          success: false,
+          seq,
+          error: `无法删除，以下单元格仍在引用它: ${downstream.join(', ')}`,
+          referencedBy: downstream
+        };
+      }
+      try {
+        graph.deleteCell(cellName);
+      } catch (e) {
+        return { success: false, seq, error: e.message };
+      }
+
+      if (namespace) {
+        wsManager.broadcastCellDeletedInNamespace(namespace, cellName);
+        nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+      } else {
+        wsManager.broadcastCellDeleted(cellName);
+      }
+
+      const afterDef = null;
+      const beforeDefForLog = newDef ? { type: newDef.type, rawValue: newDef.rawValue } : null;
+      audit.append('undo', operator, cellName, beforeDefForLog, afterDef, { undoTarget: log.seq });
+
+      if (rules) {
+        rules.onCellDeleted(cellName);
+      }
+
+      return {
+        success: true,
+        seq,
+        action: 'delete',
+        cell: cellName,
+        conflict: hasConflict,
+        laterChanges: hasConflict ? laterChanges.map(l => ({
+          seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
+        })) : undefined
+      };
+    } else {
+      const beforeDefForLog = null;
+      audit.append('undo', operator, cellName, beforeDefForLog, null, { undoTarget: log.seq });
+      return {
+        success: true,
+        seq,
+        action: 'noop',
+        cell: cellName,
+        note: '单元格原本就不存在',
+        conflict: hasConflict,
+        laterChanges: hasConflict ? laterChanges.map(l => ({
+          seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
+        })) : undefined
+      };
+    }
+  }
+
+  const targetType = oldDef.type;
+  const targetValue = oldDef.rawValue;
+
+  if (!existingCell) {
+    try {
+      const { cell, changes } = graph.createCell(cellName, targetType, targetValue);
+
+      if (namespace) {
+        wsManager.broadcastChangesToNamespace(namespace, changes);
+        nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+      } else {
+        wsManager.broadcastChanges(changes);
+      }
+
+      const beforeDefForLog = null;
+      audit.append('undo', operator, cellName, beforeDefForLog, { type: targetType, rawValue: targetValue }, { undoTarget: log.seq });
+
+      if (rules) {
+        rules.checkRules(graph, namespace);
+      }
+
+      return {
+        success: true,
+        seq,
+        action: 'recreate',
+        cell: cellName,
+        conflict: hasConflict,
+        laterChanges: hasConflict ? laterChanges.map(l => ({
+          seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
+        })) : undefined
+      };
+    } catch (e) {
+      return { success: false, seq, error: e.message };
+    }
+  }
+
+  try {
+    const beforeDefForLog = { type: existingCell.type, rawValue: existingCell.rawValue };
+    const { cell, changes } = graph.updateCell(cellName, targetType, targetValue);
+
+    if (namespace) {
+      wsManager.broadcastChangesToNamespace(namespace, changes);
+      nsMgr.propagateCrossNamespaceChange(namespace, [cellName], wsManager);
+    } else {
+      wsManager.broadcastChanges(changes);
+    }
+
+    audit.append('undo', operator, cellName, beforeDefForLog, { type: targetType, rawValue: targetValue }, { undoTarget: log.seq });
+
+    if (rules) {
+      rules.checkRules(graph, namespace);
+    }
+
+    return {
+      success: true,
+      seq,
+      action: 'restore',
+      cell: cellName,
+      conflict: hasConflict,
+      laterChanges: hasConflict ? laterChanges.map(l => ({
+        seq: l.seq, type: l.type, operator: l.operator, timestamp: l.timestamp
+      })) : undefined
+    };
+  } catch (e) {
+    return { success: false, seq, error: e.message };
+  }
+}
+
+app.post('/api/audit/undo/:seq', requireNamespace, (req, res) => {
+  const seq = Number(req.params.seq);
+  const { force = true } = req.body || {};
+  const operator = getOperator(req);
+  const graph = getComputeGraph(req);
+  const audit = getAuditEngine(req);
+  const namespace = req.namespace || null;
+  const rules = getRuleEngine(req);
+
+  if (isNaN(seq)) {
+    return res.status(400).json({ error: '无效的 seq 参数' });
+  }
+
+  const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
+
+  if (!result.success) {
+    if (result.conflict) {
+      return res.status(409).json(result);
+    }
+    return res.status(400).json(result);
+  }
+
+  res.json(result);
+});
+
+app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
+  const { fromSeq, toSeq, force = true } = req.body || {};
+  const operator = getOperator(req);
+  const graph = getComputeGraph(req);
+  const audit = getAuditEngine(req);
+  const namespace = req.namespace || null;
+  const rules = getRuleEngine(req);
+
+  const from = Number(fromSeq);
+  const to = Number(toSeq);
+
+  if (isNaN(from) || isNaN(to)) {
+    return res.status(400).json({ error: 'fromSeq 和 toSeq 必须是有效数字' });
+  }
+
+  if (from > to) {
+    return res.status(400).json({ error: 'fromSeq 不能大于 toSeq' });
+  }
+
+  const seqs = [];
+  for (let s = to; s >= from; s--) {
+    seqs.push(s);
+  }
+
+  const originalSnapshot = graph.snapshot();
+  const originalLogsLength = audit.logs.length;
+  const originalNextSeq = audit.nextSeq;
+
+  const results = [];
+  let failed = false;
+  let failureError = null;
+
+  for (const seq of seqs) {
+    const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
+    results.push(result);
+    if (!result.success) {
+      failed = true;
+      failureError = result.error || `撤销 seq=${seq} 失败`;
+      break;
+    }
+  }
+
+  if (failed) {
+    try {
+      graph.restore(originalSnapshot);
+    } catch (restoreErr) {
+      console.error('批量撤销回滚 graph 失败:', restoreErr.message);
+    }
+    audit.logs.length = originalLogsLength;
+    audit.nextSeq = originalNextSeq;
+
+    if (namespace) {
+      wsManager.broadcastRestoreToNamespace(namespace);
+    } else {
+      wsManager.broadcastRestore();
+    }
+
+    return res.status(400).json({
+      success: false,
+      error: failureError,
+      rolledBack: true,
+      partialResults: results
+    });
+  }
+
+  res.json({
+    success: true,
+    total: seqs.length,
+    results
+  });
+});
+
 app.post('/api/namespaces', (req, res) => {
   const { name } = req.body;
   if (!name) {

@@ -7,7 +7,7 @@ class AuditEngine {
     this.nextSeq = 1;
   }
 
-  append(type, operator, cellName, oldDef, newDef) {
+  append(type, operator, cellName, oldDef, newDef, extra = {}) {
     const entry = {
       seq: this.nextSeq++,
       timestamp: Date.now(),
@@ -17,8 +17,20 @@ class AuditEngine {
       oldDef: oldDef ? { type: oldDef.type, rawValue: oldDef.rawValue } : null,
       newDef: newDef ? { type: newDef.type, rawValue: newDef.rawValue } : null,
     };
+    if (extra.undoTarget !== undefined) {
+      entry.undoTarget = extra.undoTarget;
+    }
     this.logs.push(entry);
     return entry;
+  }
+
+  getLaterChanges(cellName, afterSeq) {
+    const seq = Number(afterSeq);
+    if (isNaN(seq)) return [];
+    const cellLower = cellName.toLowerCase();
+    return this.logs.filter(l =>
+      l.seq > seq && l.cellName.toLowerCase() === cellLower
+    );
   }
 
   query({ from, to, cell, operator, limit = 50, offset = 0 } = {}) {
