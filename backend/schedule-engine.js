@@ -110,6 +110,79 @@ class ScheduleEngine {
       .replace(/\$\{index\}/g, index.toString());
   }
 
+  getNestedField(obj, fieldPath) {
+    if (!obj || !fieldPath) return undefined;
+    const parts = fieldPath.split('.');
+    let current = obj;
+    for (const part of parts) {
+      if (current === null || current === undefined) return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  evaluateCondition(condition, previousResults) {
+    const { ref, field, op, value } = condition;
+    if (typeof ref !== 'number' || ref < 0 || ref >= previousResults.length) {
+      return false;
+    }
+    const refResult = previousResults[ref];
+    if (!refResult || refResult.status === 'skipped') {
+      return false;
+    }
+    const actualValue = this.getNestedField(refResult.detail, field);
+    switch (op) {
+      case 'eq':
+        return actualValue === value;
+      case 'ne':
+        return actualValue !== value;
+      case 'gt':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue > value;
+      case 'lt':
+        return typeof actualValue === 'number' && typeof value === 'number' && actualValue < value;
+      case 'contains':
+        if (typeof actualValue === 'string' && typeof value === 'string') {
+          return actualValue.includes(value);
+        }
+        if (Array.isArray(actualValue)) {
+          return actualValue.includes(value);
+        }
+        return false;
+      case 'exists':
+        return actualValue !== undefined && actualValue !== null;
+      default:
+        return false;
+    }
+  }
+
+  evaluateWhen(when, previousResults) {
+    if (!when) return { evaluated: false, result: true };
+    const conditions = Array.isArray(when) ? when : [when];
+    if (conditions.length === 0) return { evaluated: false, result: true };
+    for (const condition of conditions) {
+      if (!this.evaluateCondition(condition, previousResults)) {
+        return { evaluated: true, result: false };
+      }
+    }
+    return { evaluated: true, result: true };
+  }
+
+  checkDependency(dependsOn) {
+    if (!dependsOn) return { satisfied: true, result: true };
+    const { scheduleId, status } = dependsOn;
+    if (!scheduleId || !status) return { satisfied: false, result: false };
+    const targetSchedule = this.schedules.get(Number(scheduleId));
+    if (!targetSchedule) return { satisfied: false, result: false };
+    if (!targetSchedule.executionHistory || targetSchedule.executionHistory.length === 0) {
+      return { satisfied: false, result: false };
+    }
+    const latestExecution = targetSchedule.executionHistory[0];
+    if (latestExecution.status === status) {
+      return { satisfied: true, result: true };
+    }
+    return { satisfied: true, result: false };
+  }
+
   async executeSetValue(action, context, scheduleId) {
     const { computeGraph, wsManager, namespace } = context;
     const { cell, value } = action;
@@ -253,7 +326,53 @@ class ScheduleEngine {
     let hasPartial = false;
 
     for (const action of schedule.actions) {
-      const result = await this.executeAction(action, context, id);
+      let result;
+      let whenEvaluated = false;
+      let whenResult = true;
+
+      const depCheck = this.checkDependency(action.depends_on);
+      if (!depCheck.satisfied) {
+        result = {
+          type: action.type,
+          status: 'skipped',
+          detail: { reason: 'dependency_not_satisfied' },
+          whenEvaluated: false,
+          whenResult: 'skipped_by_dependency'
+        };
+        actionResults.push(result);
+        continue;
+      }
+      if (depCheck.satisfied && !depCheck.result) {
+        result = {
+          type: action.type,
+          status: 'skipped',
+          detail: { reason: 'dependency_status_not_match' },
+          whenEvaluated: false,
+          whenResult: 'skipped_by_dependency'
+        };
+        actionResults.push(result);
+        continue;
+      }
+
+      const whenCheck = this.evaluateWhen(action.when, actionResults);
+      whenEvaluated = whenCheck.evaluated;
+      whenResult = whenCheck.result;
+
+      if (!whenResult) {
+        result = {
+          type: action.type,
+          status: 'skipped',
+          detail: { reason: 'condition_not_met' },
+          whenEvaluated,
+          whenResult: false
+        };
+        actionResults.push(result);
+        continue;
+      }
+
+      result = await this.executeAction(action, context, id);
+      result.whenEvaluated = whenEvaluated;
+      result.whenResult = whenResult;
       actionResults.push(result);
 
       if (result.status === 'failed') {
@@ -311,7 +430,9 @@ class ScheduleEngine {
         actionResults: actionResults.map(r => ({
           type: r.type,
           status: r.status,
-          detail: r.detail
+          detail: r.detail,
+          whenEvaluated: r.whenEvaluated,
+          whenResult: r.whenResult
         }))
       };
       if (schedule.namespace) {
