@@ -923,6 +923,8 @@ function getOriginalState(computeGraph) {
 }
 
 async function runSandbox(originalGraph, instructions) {
+  await Promise.resolve();
+  
   if (!semaphore.tryAcquire()) {
     const error = new Error('沙箱并发数已达上限，请稍后再试');
     error.statusCode = 429;
