@@ -823,3 +823,72 @@ form {
   border-radius: 2px;
   padding: 0 1px;
 }
+
+.perf-alert-toast {
+  position: fixed;
+  top: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #fef3c7;
+  border: 2px solid #f59e0b;
+  border-radius: 12px;
+  padding: 16px 20px;
+  box-shadow: 0 10px 40px rgba(245, 158, 11, 0.2);
+  z-index: 1001;
+  min-width: 320px;
+  max-width: 480px;
+  animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.perf-alert-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 16px;
+  color: #92400e;
+  margin-bottom: 12px;
+}
+
+.perf-alert-icon {
+  font-size: 20px;
+}
+
+.perf-alert-content {
+  font-size: 13px;
+  color: #78350f;
+  line-height: 1.8;
+}
+
+.perf-alert-content strong {
+  color: #92400e;
+  font-weight: 600;
+}
+
+.perf-alert-slowest {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.perf-alert-node {
+  background: #fde68a;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #78350f;
+}

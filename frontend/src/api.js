@@ -128,3 +128,37 @@ export async function fetchTrace(name) {
   if (!res.ok) throw new Error(data.error);
   return data;
 }
+
+export async function fetchPerfRecent(limit = 50) {
+  const res = await fetch(`${API_BASE}/perf/recent?limit=${limit}`);
+  const data = await res.json();
+  return data.records || [];
+}
+
+export async function fetchPerfCells() {
+  const res = await fetch(`${API_BASE}/perf/cells`);
+  const data = await res.json();
+  return data.cells || [];
+}
+
+export async function fetchPerfHeatmap() {
+  const res = await fetch(`${API_BASE}/perf/heatmap`);
+  return res.json();
+}
+
+export async function fetchPerfThreshold() {
+  const res = await fetch(`${API_BASE}/perf/threshold`);
+  const data = await res.json();
+  return data.thresholdMs;
+}
+
+export async function setPerfThreshold(thresholdMs) {
+  const res = await fetch(`${API_BASE}/perf/threshold`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thresholdMs })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.thresholdMs;
+}

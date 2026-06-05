@@ -178,7 +178,11 @@ class WebSocketManager {
   broadcastPerfAlert(alertData, namespace = null) {
     const message = JSON.stringify({
       type: 'perf_alert',
-      data: alertData
+      totalMs: alertData.totalMs,
+      trigger: alertData.trigger,
+      slowest: alertData.slowest,
+      nodeCount: alertData.nodeCount,
+      timestamp: alertData.timestamp
     });
 
     for (const info of this.clients.values()) {

@@ -5,6 +5,14 @@ const NODE_WIDTH = 120;
 const NODE_HEIGHT = 60;
 const BORDER_RADIUS = 8;
 
+function getHeatmapColor(avgMs, maxMs) {
+  if (avgMs <= 0 || maxMs <= 0) return null;
+  const ratio = Math.min(avgMs / maxMs, 1);
+  const r = Math.round(255 * ratio);
+  const g = Math.round(255 * (1 - ratio));
+  return `rgb(${r}, ${g}, 0)`;
+}
+
 export default function GraphCanvas({
   cells,
   selectedCell,
@@ -13,7 +21,9 @@ export default function GraphCanvas({
   onBackgroundDoubleClick,
   onChange,
   flashingCells,
-  diffCells = new Set()
+  diffCells = new Set(),
+  heatmapEnabled = false,
+  cellPerfData = new Map()
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -55,15 +65,31 @@ export default function GraphCanvas({
     ctx.stroke();
   }, []);
 
+  const maxPerfMs = React.useMemo(() => {
+    if (cellPerfData.size === 0) return 0;
+    let max = 0;
+    for (const perf of cellPerfData.values()) {
+      max = Math.max(max, perf.avgMs || 0);
+    }
+    return max;
+  }, [cellPerfData]);
+
   const drawNode = useCallback((ctx, node, cell) => {
     const { x, y } = node;
     const isSelected = selectedCell && selectedCell.name === node.name;
     const isFlashing = flashingCells.has(node.name);
     const isDiff = diffCells.has(node.name);
+    const perfData = cellPerfData.get(node.name);
 
     let borderColor = '#3b82f6';
     if (cell && cell.type === 'formula') {
       borderColor = '#22c55e';
+    }
+    if (heatmapEnabled && perfData && !isSelected) {
+      const heatColor = getHeatmapColor(perfData.avgMs, maxPerfMs);
+      if (heatColor) {
+        borderColor = heatColor;
+      }
     }
     if (isSelected) {
       borderColor = '#f59e0b';
@@ -128,7 +154,7 @@ export default function GraphCanvas({
       ctx.font = '11px system-ui, -apple-system, sans-serif';
       ctx.fillText(displayValue.substring(0, 15), x, y + 12);
     }
-  }, [selectedCell, flashingCells, diffCells]);
+  }, [selectedCell, flashingCells, diffCells, heatmapEnabled, cellPerfData, maxPerfMs]);
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -189,12 +215,12 @@ export default function GraphCanvas({
     const running = layout.step();
     render();
 
-    if (running || flashingCells.size > 0 || diffCells.size > 0) {
+    if (running || flashingCells.size > 0 || diffCells.size > 0 || heatmapEnabled) {
       animationRef.current = requestAnimationFrame(animate);
     } else {
       animationRef.current = null;
     }
-  }, [render, flashingCells.size, diffCells.size]);
+  }, [render, flashingCells.size, diffCells.size, heatmapEnabled]);
 
   useEffect(() => {
     if (!layoutRef.current) {

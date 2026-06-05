@@ -13,7 +13,8 @@ import {
   exportGraph,
   importGraph,
   createSnapshot,
-  compareSnapshots
+  compareSnapshots,
+  fetchPerfCells
 } from './api.js';
 
 export default function App() {
@@ -31,12 +32,20 @@ export default function App() {
   const [snapshotRefresh, setSnapshotRefresh] = useState(0);
   const [diffCells, setDiffCells] = useState(new Set());
   const [showDiffLegend, setShowDiffLegend] = useState(false);
+  const [perfAlert, setPerfAlert] = useState(null);
+  const [heatmapEnabled, setHeatmapEnabled] = useState(false);
+  const [cellPerfData, setCellPerfData] = useState(new Map());
   const wsRef = useRef(null);
   const clientIdRef = useRef(null);
 
   const showNotification = (message, type = 'error') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 4000);
+  };
+
+  const showPerfAlert = (alert) => {
+    setPerfAlert(alert);
+    setTimeout(() => setPerfAlert(null), 3000);
   };
 
   const triggerFlash = useCallback((names) => {
@@ -120,6 +129,10 @@ export default function App() {
 
       case 'online':
         setOnlineCount(message.data.count);
+        break;
+
+      case 'perf_alert':
+        showPerfAlert(message);
         break;
 
       default:
@@ -322,6 +335,23 @@ export default function App() {
     }
   };
 
+  const loadCellPerfData = async () => {
+    try {
+      const perfCells = await fetchPerfCells();
+      const perfMap = new Map(perfCells.map(p => [p.name, p]));
+      setCellPerfData(perfMap);
+    } catch (e) {
+      console.error('加载性能数据失败:', e);
+    }
+  };
+
+  const toggleHeatmap = async () => {
+    if (!heatmapEnabled) {
+      await loadCellPerfData();
+    }
+    setHeatmapEnabled(prev => !prev);
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -336,6 +366,14 @@ export default function App() {
           </div>
         </div>
         <div className="header-right">
+          <button 
+            className={`btn-secondary ${heatmapEnabled ? 'active' : ''}`} 
+            onClick={toggleHeatmap} 
+            title="性能热力图"
+            style={{ background: heatmapEnabled ? '#fef3c7' : undefined }}
+          >
+            🔥
+          </button>
           <button className="btn-secondary" onClick={handleCreateSnapshot} title="创建快照">📸</button>
           <button className="btn-secondary" onClick={() => setShowSnapshotPanel(true)} title="快照管理">🕐</button>
           <button className="btn-secondary" onClick={handleRefresh}>刷新</button>
@@ -355,6 +393,8 @@ export default function App() {
             onBackgroundDoubleClick={handleBackgroundDoubleClick}
             flashingCells={flashingCells}
             diffCells={diffCells}
+            heatmapEnabled={heatmapEnabled}
+            cellPerfData={cellPerfData}
           />
         </div>
         <DetailPanel
@@ -404,6 +444,28 @@ export default function App() {
       {notification && (
         <div className={`notification ${notification.type}`}>
           {notification.message}
+        </div>
+      )}
+
+      {perfAlert && (
+        <div className="perf-alert-toast">
+          <div className="perf-alert-title">
+            <span className="perf-alert-icon">⚠️</span>
+            <span>慢计算告警</span>
+          </div>
+          <div className="perf-alert-content">
+            <div>触发源: {perfAlert.trigger}</div>
+            <div>总耗时: <strong>{perfAlert.totalMs}ms</strong></div>
+            <div>节点数: {perfAlert.nodeCount}</div>
+            <div className="perf-alert-slowest">
+              最慢节点:
+              {perfAlert.slowest?.map?.((s, i) => (
+                <span key={i} className="perf-alert-node">
+                  {s.name} ({s.durationMs}ms)
+                </span>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
