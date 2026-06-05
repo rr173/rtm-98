@@ -220,3 +220,69 @@ export async function fetchRuleHistory(id) {
   if (!res.ok) throw new Error(data.error);
   return data.history || [];
 }
+
+export async function createBaseline(name, description = '') {
+  const res = await fetch(`${API_BASE}/baselines`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function fetchBaselines() {
+  const res = await fetch(`${API_BASE}/baselines`);
+  const data = await res.json();
+  return data.baselines || [];
+}
+
+export async function fetchBaseline(id) {
+  const res = await fetch(`${API_BASE}/baselines/${id}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function deleteBaseline(id) {
+  const res = await fetch(`${API_BASE}/baselines/${id}`, {
+    method: 'DELETE'
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function checkBaseline(id, tolerance) {
+  const res = await fetch(`${API_BASE}/baselines/${id}/check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tolerance })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}
+
+export async function checkAllBaselines(tolerance) {
+  const res = await fetch(`${API_BASE}/baselines/check-all`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tolerance })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data.results || [];
+}
+
+export async function blameBaseline(id, tolerance) {
+  const res = await fetch(`${API_BASE}/baselines/${id}/blame`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tolerance })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error);
+  return data;
+}

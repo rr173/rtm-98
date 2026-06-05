@@ -24,7 +24,8 @@ export default function GraphCanvas({
   diffCells = new Set(),
   heatmapEnabled = false,
   cellPerfData = new Map(),
-  ruleAlerts = new Map()
+  ruleAlerts = new Map(),
+  highlightedPath = new Set()
 }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
@@ -36,7 +37,7 @@ export default function GraphCanvas({
 
   const getCell = useCallback((name) => cells.find(c => c.name === name), [cells]);
 
-  const drawArrow = useCallback((ctx, fromX, fromY, toX, toY) => {
+  const drawArrow = useCallback((ctx, fromX, fromY, toX, toY, isHighlighted = false) => {
     const headLength = 12;
     const angle = Math.atan2(toY - fromY, toX - fromX);
 
@@ -46,8 +47,8 @@ export default function GraphCanvas({
     ctx.beginPath();
     ctx.moveTo(fromX, fromY);
     ctx.lineTo(targetX, targetY);
-    ctx.strokeStyle = '#94a3b8';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = isHighlighted ? '#8b5cf6' : '#94a3b8';
+    ctx.lineWidth = isHighlighted ? 3 : 1.5;
     ctx.stroke();
 
     ctx.beginPath();
@@ -61,8 +62,8 @@ export default function GraphCanvas({
       targetX - headLength * Math.cos(angle + Math.PI / 6),
       targetY - headLength * Math.sin(angle + Math.PI / 6)
     );
-    ctx.strokeStyle = '#64748b';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = isHighlighted ? '#7c3aed' : '#64748b';
+    ctx.lineWidth = isHighlighted ? 3 : 2;
     ctx.stroke();
   }, []);
 
@@ -81,6 +82,7 @@ export default function GraphCanvas({
     const isFlashing = flashingCells.has(node.name);
     const isDiff = diffCells.has(node.name);
     const perfData = cellPerfData.get(node.name);
+    const isInPath = highlightedPath.has(node.name);
 
     let borderColor = '#3b82f6';
     if (cell && cell.type === 'formula') {
@@ -98,6 +100,9 @@ export default function GraphCanvas({
     if (isDiff && !isSelected) {
       borderColor = '#f97316';
     }
+    if (isInPath && !isSelected) {
+      borderColor = '#8b5cf6';
+    }
 
     if (isFlashing) {
       const time = flashingCells.get(node.name);
@@ -108,16 +113,21 @@ export default function GraphCanvas({
     } else if (isDiff) {
       ctx.shadowColor = 'rgba(249, 115, 22, 0.5)';
       ctx.shadowBlur = 15;
+    } else if (isInPath) {
+      ctx.shadowColor = 'rgba(139, 92, 246, 0.6)';
+      ctx.shadowBlur = 18;
     }
 
     ctx.fillStyle = isFlashing
       ? `rgba(250, 204, 21, ${Math.max(0.1, 1 - (Date.now() - flashingCells.get(node.name)) / 500)})`
       : isDiff
       ? 'rgba(255, 247, 237, 1)'
+      : isInPath
+      ? 'rgba(245, 243, 255, 1)'
       : '#ffffff';
 
     ctx.strokeStyle = borderColor;
-    ctx.lineWidth = isSelected || isDiff ? 3 : 2;
+    ctx.lineWidth = isSelected || isDiff || isInPath ? 3 : 2;
 
     ctx.beginPath();
     ctx.roundRect(
@@ -155,7 +165,7 @@ export default function GraphCanvas({
       ctx.font = '11px system-ui, -apple-system, sans-serif';
       ctx.fillText(displayValue.substring(0, 15), x, y + 12);
     }
-  }, [selectedCell, flashingCells, diffCells, heatmapEnabled, cellPerfData, maxPerfMs]);
+  }, [selectedCell, flashingCells, diffCells, heatmapEnabled, cellPerfData, maxPerfMs, highlightedPath]);
 
   const render = useCallback(() => {
     const canvas = canvasRef.current;
@@ -193,12 +203,14 @@ export default function GraphCanvas({
       const source = layout.getNode(edge.source);
       const target = layout.getNode(edge.target);
       if (source && target) {
+        const isEdgeHighlighted = highlightedPath.has(edge.source) && highlightedPath.has(edge.target);
         drawArrow(
           ctx,
           source.x,
           source.y,
           target.x,
-          target.y
+          target.y,
+          isEdgeHighlighted
         );
       }
     }
@@ -239,12 +251,12 @@ export default function GraphCanvas({
     const running = layout.step();
     render();
 
-    if (running || flashingCells.size > 0 || diffCells.size > 0 || heatmapEnabled || ruleAlerts.size > 0) {
+    if (running || flashingCells.size > 0 || diffCells.size > 0 || heatmapEnabled || ruleAlerts.size > 0 || highlightedPath.size > 0) {
       animationRef.current = requestAnimationFrame(animate);
     } else {
       animationRef.current = null;
     }
-  }, [render, flashingCells.size, diffCells.size, heatmapEnabled, ruleAlerts.size]);
+  }, [render, flashingCells.size, diffCells.size, heatmapEnabled, ruleAlerts.size, highlightedPath.size]);
 
   useEffect(() => {
     if (!layoutRef.current) {

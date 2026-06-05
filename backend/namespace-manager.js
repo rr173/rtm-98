@@ -3,6 +3,7 @@ const { ComputeGraph } = require('./compute-graph');
 const { SnapshotManager } = require('./snapshot-manager');
 const { AuditEngine } = require('./audit-engine');
 const { RuleEngine } = require('./rule-engine');
+const { BaselineEngine } = require('./baseline-engine');
 
 const MAX_NAMESPACES = 50;
 const MAX_CELLS_PER_NAMESPACE = 500;
@@ -56,6 +57,7 @@ class NamespaceManager {
     const snapshotManager = new SnapshotManager();
     const auditEngine = new AuditEngine();
     const ruleEngine = new RuleEngine();
+    const baselineEngine = new BaselineEngine();
 
     const crossNamespaceResolver = (ns, cellName) => {
       return this.resolveCrossNamespaceRef(name, ns, cellName);
@@ -75,6 +77,7 @@ class NamespaceManager {
       snapshotManager,
       auditEngine,
       ruleEngine,
+      baselineEngine,
       publishedCells: new Set(),
       createdAt: Date.now()
     };

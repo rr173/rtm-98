@@ -8,6 +8,7 @@ const { SnapshotManager } = require('./snapshot-manager');
 const { AuditEngine } = require('./audit-engine');
 const { NamespaceManager } = require('./namespace-manager');
 const { TemplateManager } = require('./template-manager');
+const { BaselineEngine } = require('./baseline-engine');
 const { demoCells, demoNamespaces, demoSandboxScript } = require('./demo-data');
 const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./sandbox-engine');
 const { RuleEngine } = require('./rule-engine');
@@ -29,6 +30,7 @@ const auditEngine = new AuditEngine();
 const nsManager = new NamespaceManager(ADMIN_KEY);
 const templateManager = new TemplateManager(ADMIN_KEY);
 const ruleEngine = new RuleEngine();
+const baselineEngine = new BaselineEngine();
 ruleEngine.setWebSocketManager(wsManager);
 wsManager.setNamespaceManager(nsManager);
 nsManager.setWebSocketManager(wsManager);
@@ -212,6 +214,13 @@ function getRuleEngine(req) {
     return req.nsInfo.ruleEngine;
   }
   return ruleEngine;
+}
+
+function getBaselineEngine(req) {
+  if (req.namespace && req.nsInfo) {
+    return req.nsInfo.baselineEngine;
+  }
+  return baselineEngine;
 }
 
 app.get('/api/health', (req, res) => {
@@ -1037,6 +1046,96 @@ app.get('/api/rules/:id/history', requireNamespace, (req, res) => {
   res.json({ history });
 });
 
+app.post('/api/baselines', requireNamespace, (req, res) => {
+  const { name, description } = req.body;
+  const graph = getComputeGraph(req);
+  const baselineEngine = getBaselineEngine(req);
+
+  if (!name) {
+    return res.status(400).json({ error: '缺少必要参数: name' });
+  }
+
+  try {
+    const baseline = baselineEngine.createBaseline(graph, name, description);
+    res.json(baseline);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/baselines', requireNamespace, (req, res) => {
+  const baselineEngine = getBaselineEngine(req);
+  res.json({ baselines: baselineEngine.getBaselines() });
+});
+
+app.get('/api/baselines/:id', requireNamespace, (req, res) => {
+  const baselineEngine = getBaselineEngine(req);
+  const baseline = baselineEngine.getBaseline(req.params.id);
+  if (!baseline) {
+    return res.status(404).json({ error: '基线不存在' });
+  }
+  res.json(baseline);
+});
+
+app.delete('/api/baselines/:id', requireNamespace, (req, res) => {
+  const baselineEngine = getBaselineEngine(req);
+  const deleted = baselineEngine.deleteBaseline(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: '基线不存在' });
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/baselines/:id/check', requireNamespace, (req, res) => {
+  const { tolerance } = req.body;
+  const graph = getComputeGraph(req);
+  const baselineEngine = getBaselineEngine(req);
+
+  try {
+    const result = baselineEngine.checkBaseline(
+      req.params.id,
+      graph,
+      tolerance !== undefined ? Number(tolerance) : undefined
+    );
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/baselines/check-all', requireNamespace, (req, res) => {
+  const { tolerance } = req.body;
+  const graph = getComputeGraph(req);
+  const baselineEngine = getBaselineEngine(req);
+
+  try {
+    const results = baselineEngine.checkAllBaselines(
+      graph,
+      tolerance !== undefined ? Number(tolerance) : undefined
+    );
+    res.json({ results });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/baselines/:id/blame', requireNamespace, (req, res) => {
+  const { tolerance } = req.body;
+  const graph = getComputeGraph(req);
+  const baselineEngine = getBaselineEngine(req);
+
+  try {
+    const result = baselineEngine.blame(
+      req.params.id,
+      graph,
+      tolerance !== undefined ? Number(tolerance) : undefined
+    );
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.use((err, req, res, next) => {
   console.error('服务器错误:', err);
   res.status(500).json({ error: '服务器内部错误' });
@@ -1046,6 +1145,18 @@ loadDemoData();
 loadDemoNamespaces();
 loadDemoTemplate();
 
+function loadDemoBaseline() {
+  console.log('正在创建演示基线...');
+  try {
+    baselineEngine.createBaseline(computeGraph, '初始演示数据', '系统启动时自动创建的基线');
+    console.log('演示基线已创建');
+  } catch (e) {
+    console.error('演示基线创建失败:', e.message);
+  }
+}
+
+loadDemoBaseline();
+
 server.listen(PORT, () => {
   console.log(`表达式求值沙盘后端已启动`);
   console.log(`HTTP 服务器: http://localhost:${PORT}`);
@@ -1053,5 +1164,6 @@ server.listen(PORT, () => {
   console.log(`演示数据已加载: ${demoCells.length} 个单元格`);
   console.log(`演示命名空间已加载: ${demoNamespaces.length} 个`);
   console.log(`模板市场已启用 (最多 ${templateManager.constructor.MAX_TEMPLATES || 100} 个模板)`);
+  console.log(`基线回归引擎已启用 (最多 ${baselineEngine.constructor.MAX_BASELINES || 30} 条基线)`);
   console.log(`管理员密钥已配置 (ADMIN_KEY 环境变量${ADMIN_KEY === 'admin-secret-key' ? '，使用默认值' : ''})`);
 });

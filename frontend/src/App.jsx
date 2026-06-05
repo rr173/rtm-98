@@ -4,6 +4,7 @@ import EditModal from './EditModal.jsx';
 import DetailPanel from './DetailPanel.jsx';
 import SnapshotPanel from './SnapshotPanel.jsx';
 import RulePanel from './RulePanel.jsx';
+import BaselinePanel from './BaselinePanel.jsx';
 import { createWebSocketConnection } from './websocket.js';
 import {
   fetchCells,
@@ -38,6 +39,9 @@ export default function App() {
   const [cellPerfData, setCellPerfData] = useState(new Map());
   const [showRulePanel, setShowRulePanel] = useState(false);
   const [ruleAlerts, setRuleAlerts] = useState(new Map());
+  const [showBaselinePanel, setShowBaselinePanel] = useState(false);
+  const [baselineRefresh, setBaselineRefresh] = useState(0);
+  const [highlightedPath, setHighlightedPath] = useState(new Set());
   const wsRef = useRef(null);
   const clientIdRef = useRef(null);
 
@@ -373,6 +377,14 @@ export default function App() {
     setHeatmapEnabled(prev => !prev);
   };
 
+  const handleHighlightPath = (path) => {
+    setHighlightedPath(new Set(path));
+  };
+
+  const handleClearHighlightedPath = () => {
+    setHighlightedPath(new Set());
+  };
+
   return (
     <div className="app">
       <header className="app-header">
@@ -398,6 +410,7 @@ export default function App() {
           <button className="btn-secondary" onClick={handleCreateSnapshot} title="创建快照">📸</button>
           <button className="btn-secondary" onClick={() => setShowSnapshotPanel(true)} title="快照管理">🕐</button>
           <button className="btn-secondary" onClick={() => setShowRulePanel(true)} title="规则管理">⚡</button>
+          <button className="btn-secondary baseline-btn" onClick={() => setShowBaselinePanel(true)} title="基线管理 & 回归检测">✓</button>
           <button className="btn-secondary" onClick={handleRefresh}>刷新</button>
           <button className="btn-secondary" onClick={handleExport}>导出</button>
           <button className="btn-secondary" onClick={handleImport}>导入</button>
@@ -418,6 +431,7 @@ export default function App() {
             heatmapEnabled={heatmapEnabled}
             cellPerfData={cellPerfData}
             ruleAlerts={ruleAlerts}
+            highlightedPath={highlightedPath}
           />
         </div>
         <DetailPanel
@@ -497,6 +511,17 @@ export default function App() {
         onClose={() => setShowRulePanel(false)}
         cells={cells}
         showNotification={showNotification}
+      />
+
+      <BaselinePanel
+        isOpen={showBaselinePanel}
+        onClose={() => {
+          setShowBaselinePanel(false);
+          handleClearHighlightedPath();
+        }}
+        onHighlightPath={handleHighlightPath}
+        showNotification={showNotification}
+        refreshTrigger={baselineRefresh}
       />
 
       {showModal && (
