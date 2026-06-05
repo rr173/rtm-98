@@ -4,12 +4,22 @@ const { parseExpression, evaluateExpression, StructuredError } = require('./expr
 const MAX_CONCURRENT_SANDBOXES = 3;
 const MAX_EXECUTION_TIME_MS = 5000;
 const MAX_INSTRUCTIONS = 100;
+const MAX_EXPRESSION_RECURSION_DEPTH = 50;
+const MAX_CELL_COMPUTE_COUNT = 10000;
 
 class Semaphore {
   constructor(max) {
     this.max = max;
     this.current = 0;
     this.queue = [];
+  }
+
+  tryAcquire() {
+    if (this.current < this.max) {
+      this.current++;
+      return true;
+    }
+    return false;
   }
 
   async acquire() {
@@ -81,8 +91,308 @@ function createSandboxCrossNamespaceResolver() {
   };
 }
 
+class ExecutionTimeoutError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ExecutionTimeoutError';
+  }
+}
+
+class SandboxEvaluator {
+  constructor(cellResolver, expression, crossNamespaceResolver, timeoutChecker) {
+    this.cellResolver = cellResolver;
+    this.expression = expression;
+    this.crossNamespaceResolver = crossNamespaceResolver;
+    this.timeoutChecker = timeoutChecker;
+    this.recursionDepth = 0;
+    this.evalCount = 0;
+  }
+
+  checkTimeout() {
+    this.evalCount++;
+    if (this.evalCount % 100 === 0) {
+      this.timeoutChecker.check();
+    }
+    if (this.recursionDepth > MAX_EXPRESSION_RECURSION_DEPTH) {
+      throw new ExecutionTimeoutError(`表达式递归深度超过限制 (${MAX_EXPRESSION_RECURSION_DEPTH})`);
+    }
+  }
+
+  evaluate(node) {
+    this.recursionDepth++;
+    try {
+      this.checkTimeout();
+      return this.evaluateNode(node);
+    } finally {
+      this.recursionDepth--;
+    }
+  }
+
+  evaluateNode(node) {
+    switch (node.type) {
+      case 'Number':
+        return { type: 'number', value: node.value };
+
+      case 'String':
+        return { type: 'string', value: node.value };
+
+      case 'CellRef': {
+        const cell = this.cellResolver(node.value);
+        if (!cell) {
+          throw new StructuredError(
+            `引用的单元格 '${node.value}' 不存在`,
+            node.start,
+            node.end,
+            this.expression
+          );
+        }
+        return cell.value;
+      }
+
+      case 'CrossRef': {
+        if (!this.crossNamespaceResolver) {
+          throw new StructuredError(
+            `跨命名空间引用 '${node.value}' 不可用`,
+            node.start,
+            node.end,
+            this.expression
+          );
+        }
+        const result = this.crossNamespaceResolver(node.namespace, node.cellName);
+        if (!result) {
+          throw new StructuredError(
+            `跨命名空间引用 '${node.value}' 无法解析`,
+            node.start,
+            node.end,
+            this.expression
+          );
+        }
+        if (result.error) {
+          throw new StructuredError(
+            result.error,
+            node.start,
+            node.end,
+            this.expression
+          );
+        }
+        return result.value;
+      }
+
+      case 'UnaryOp': {
+        const operand = this.evaluate(node.children[0]);
+        if (operand.type !== 'number') {
+          throw new StructuredError(
+            `一元运算符 '${node.value}' 只能用于数值类型`,
+            node.start,
+            node.end,
+            this.expression
+          );
+        }
+        if (node.value === '+') {
+          return { type: 'number', value: operand.value };
+        } else {
+          return { type: 'number', value: -operand.value };
+        }
+      }
+
+      case 'BinOp': {
+        const left = this.evaluate(node.children[0]);
+        const right = this.evaluate(node.children[1]);
+
+        if (['+', '-', '*', '/'].includes(node.value)) {
+          if (left.type !== 'number' || right.type !== 'number') {
+            throw new StructuredError(
+              `算术运算符 '${node.value}' 需要两个数值类型`,
+              node.opStart,
+              node.opEnd,
+              this.expression
+            );
+          }
+          switch (node.value) {
+            case '+': return { type: 'number', value: left.value + right.value };
+            case '-': return { type: 'number', value: left.value - right.value };
+            case '*': return { type: 'number', value: left.value * right.value };
+            case '/':
+              if (right.value === 0) {
+                throw new StructuredError(
+                  '除数不能为零',
+                  node.opStart,
+                  node.opEnd,
+                  this.expression
+                );
+              }
+              return { type: 'number', value: left.value / right.value };
+          }
+        }
+
+        if (['>', '<', '>=', '<=', '==', '!='].includes(node.value)) {
+          if (left.type !== right.type) {
+            throw new StructuredError(
+              `比较运算符 '${node.value}' 需要两个相同类型的操作数`,
+              node.opStart,
+              node.opEnd,
+              this.expression
+            );
+          }
+          let result;
+          switch (node.value) {
+            case '>': result = left.value > right.value; break;
+            case '<': result = left.value < right.value; break;
+            case '>=': result = left.value >= right.value; break;
+            case '<=': result = left.value <= right.value; break;
+            case '==': result = left.value === right.value; break;
+            case '!=': result = left.value !== right.value; break;
+          }
+          return { type: 'number', value: result ? 1 : 0 };
+        }
+
+        throw new StructuredError(
+          `未知的二元运算符: ${node.value}`,
+          node.opStart,
+          node.opEnd,
+          this.expression
+        );
+      }
+
+      case 'Function': {
+        return this.evaluateFunction(node);
+      }
+
+      default:
+        throw new StructuredError(
+          `未知的AST节点类型: ${node.type}`,
+          node.start,
+          node.end,
+          this.expression
+        );
+    }
+  }
+
+  evaluateFunction(node) {
+    const funcName = node.value;
+
+    switch (funcName) {
+      case 'IF': {
+        const cond = this.evaluate(node.children[0]);
+        if (cond.type !== 'number') {
+          throw new StructuredError(
+            'IF的条件必须是数值类型',
+            node.nameStart,
+            node.nameEnd,
+            this.expression
+          );
+        }
+        const branch = cond.value !== 0 ? node.children[1] : node.children[2];
+        const branchResult = this.evaluate(branch);
+        return branchResult;
+      }
+
+      default: {
+        const args = node.children.map(c => this.evaluate(c));
+
+        let result;
+        switch (funcName) {
+          case 'MIN': {
+            args.forEach((a, i) => {
+              if (a.type !== 'number') {
+                throw new StructuredError(
+                  `MIN的第 ${i + 1} 个参数必须是数值类型`,
+                  node.nameStart,
+                  node.nameEnd,
+                  this.expression
+                );
+              }
+            });
+            result = { type: 'number', value: Math.min(...args.map(a => a.value)) };
+            break;
+          }
+          case 'MAX': {
+            args.forEach((a, i) => {
+              if (a.type !== 'number') {
+                throw new StructuredError(
+                  `MAX的第 ${i + 1} 个参数必须是数值类型`,
+                  node.nameStart,
+                  node.nameEnd,
+                  this.expression
+                );
+              }
+            });
+            result = { type: 'number', value: Math.max(...args.map(a => a.value)) };
+            break;
+          }
+          case 'ABS': {
+            if (args[0].type !== 'number') {
+              throw new StructuredError(
+                'ABS的参数必须是数值类型',
+                node.nameStart,
+                node.nameEnd,
+                this.expression
+              );
+            }
+            result = { type: 'number', value: Math.abs(args[0].value) };
+            break;
+          }
+          case 'ROUND': {
+            if (args[0].type !== 'number') {
+              throw new StructuredError(
+                'ROUND的第一个参数必须是数值类型',
+                node.nameStart,
+                node.nameEnd,
+                this.expression
+              );
+            }
+            if (args[1].type !== 'number') {
+              throw new StructuredError(
+                'ROUND的第二个参数必须是数值类型',
+                node.nameStart,
+                node.nameEnd,
+                this.expression
+              );
+            }
+            const factor = Math.pow(10, Math.round(args[1].value));
+            result = { type: 'number', value: Math.round(args[0].value * factor) / factor };
+            break;
+          }
+          case 'CONCAT': {
+            const strs = args.map(a => a.value.toString());
+            result = { type: 'string', value: strs.join('') };
+            break;
+          }
+          default:
+            throw new StructuredError(
+              `未知的函数: ${funcName}`,
+              node.nameStart,
+              node.nameEnd,
+              this.expression
+            );
+        }
+
+        return result;
+      }
+    }
+  }
+}
+
+class TimeoutChecker {
+  constructor(timeoutMs) {
+    this.startTime = Date.now();
+    this.timeoutMs = timeoutMs;
+    this.timedOut = false;
+  }
+
+  check() {
+    if (this.timedOut) {
+      throw new ExecutionTimeoutError('沙箱执行超时');
+    }
+    if (Date.now() - this.startTime > this.timeoutMs) {
+      this.timedOut = true;
+      throw new ExecutionTimeoutError('沙箱执行超时');
+    }
+  }
+}
+
 class Sandbox {
-  constructor(originalGraph) {
+  constructor(originalGraph, timeoutMs = MAX_EXECUTION_TIME_MS) {
     this.cells = cloneGraphState(originalGraph);
     this.maxCells = originalGraph.maxCells;
     this.crossNamespaceResolver = createSandboxCrossNamespaceResolver();
@@ -90,6 +400,12 @@ class Sandbox {
     this.stepCounter = 0;
     this.fatalError = null;
     this.timedOut = false;
+    this.timeoutChecker = new TimeoutChecker(timeoutMs);
+    this.cellComputeCount = 0;
+  }
+
+  checkTimeout() {
+    this.timeoutChecker.check();
   }
 
   getLocalDependencies(dependencies) {
@@ -178,6 +494,13 @@ class Sandbox {
   }
 
   computeCell(name) {
+    this.cellComputeCount++;
+    if (this.cellComputeCount > MAX_CELL_COMPUTE_COUNT) {
+      throw new ExecutionTimeoutError(`单元格计算次数超过限制 (${MAX_CELL_COMPUTE_COUNT})`);
+    }
+
+    this.checkTimeout();
+
     const cell = this.cells.get(name);
     if (!cell) throw new Error(`单元格 '${name}' 不存在`);
     const startTime = Date.now();
@@ -187,18 +510,22 @@ class Sandbox {
     }
     if (cell.type === 'formula') {
       try {
-        const result = evaluateExpression(
-          cell.ast,
+        const evaluator = new SandboxEvaluator(
           (refName) => this.cells.get(refName),
           cell.rawValue,
-          this.crossNamespaceResolver
+          this.crossNamespaceResolver,
+          this.timeoutChecker
         );
+        const result = evaluator.evaluate(cell.ast);
         cell.value = result;
         cell.error = null;
         cell.structuredError = null;
         cell.computeTimeMs = Date.now() - startTime;
         return result;
       } catch (e) {
+        if (e instanceof ExecutionTimeoutError) {
+          throw e;
+        }
         cell.error = e.message;
         cell.structuredError = e instanceof StructuredError ? e.toJSON() : null;
         cell.computeTimeMs = Date.now() - startTime;
@@ -215,6 +542,7 @@ class Sandbox {
     const changes = [];
     const errors = [];
     for (const name of sorted) {
+      this.checkTimeout();
       const cell = this.cells.get(name);
       if (!cell) continue;
       const oldValue = cell.value ? { ...cell.value } : null;
@@ -230,6 +558,9 @@ class Sandbox {
           });
         }
       } catch (e) {
+        if (e instanceof ExecutionTimeoutError) {
+          throw e;
+        }
         errors.push({ name, error: e.message });
       }
     }
@@ -237,6 +568,7 @@ class Sandbox {
   }
 
   parseValue(cellType, rawValue) {
+    this.checkTimeout();
     if (cellType === 'constant') {
       if (typeof rawValue === 'number') {
         return { type: 'number', value: rawValue };
@@ -259,6 +591,7 @@ class Sandbox {
     const localDeps = this.getLocalDependencies(dependencies);
     const visited = new Map();
     const dfs = (name, path) => {
+      this.checkTimeout();
       if (visited.get(name) === 1) {
         const cycleStart = path.indexOf(name);
         return path.slice(cycleStart).concat(name);
@@ -298,12 +631,13 @@ class Sandbox {
     }
     try {
       const { ast } = parseExpression(condition);
-      const result = evaluateExpression(
-        ast,
+      const evaluator = new SandboxEvaluator(
         (refName) => this.cells.get(refName),
         condition,
-        this.crossNamespaceResolver
+        this.crossNamespaceResolver,
+        this.timeoutChecker
       );
+      const result = evaluator.evaluate(ast);
       if (result.type === 'number') {
         return result.value !== 0;
       }
@@ -312,11 +646,15 @@ class Sandbox {
       }
       return Boolean(result.value);
     } catch (e) {
+      if (e instanceof ExecutionTimeoutError) {
+        throw e;
+      }
       throw new Error(`条件表达式求值失败: ${e.message}`);
     }
   }
 
   createCell(name, cellType, rawValue) {
+    this.checkTimeout();
     if (this.cells.size >= this.maxCells) {
       throw new Error(`最多支持 ${this.maxCells} 个单元格`);
     }
@@ -356,6 +694,7 @@ class Sandbox {
   }
 
   updateCell(name, cellType, rawValue) {
+    this.checkTimeout();
     const existingCell = this.cells.get(name);
     if (!existingCell) {
       throw new Error(`单元格 '${name}' 不存在`);
@@ -385,6 +724,7 @@ class Sandbox {
   }
 
   deleteCell(name) {
+    this.checkTimeout();
     if (!this.cells.has(name)) {
       throw new Error(`单元格 '${name}' 不存在`);
     }
@@ -431,6 +771,7 @@ class Sandbox {
   }
 
   executeInstruction(instruction) {
+    this.checkTimeout();
     this.stepCounter++;
     const step = this.stepCounter;
     const { op, name, type, value, condition } = instruction;
@@ -442,6 +783,11 @@ class Sandbox {
         }
       }
     } catch (e) {
+      if (e instanceof ExecutionTimeoutError) {
+        this.timedOut = true;
+        this.fatalError = e.message;
+        return this.recordFrame(step, op, name, { status: 'timeout', error: e.message, fatal: true }, []);
+      }
       this.fatalError = e.message;
       return this.recordFrame(step, op, name, { status: 'error', error: e.message, fatal: true }, []);
     }
@@ -474,6 +820,11 @@ class Sandbox {
       }
       return this.recordFrame(step, op, name, { status: 'success' }, affected);
     } catch (e) {
+      if (e instanceof ExecutionTimeoutError) {
+        this.timedOut = true;
+        this.fatalError = e.message;
+        return this.recordFrame(step, op, name, { status: 'timeout', error: e.message, fatal: true }, []);
+      }
       const isFatal = e.message.includes('循环依赖');
       if (isFatal) {
         this.fatalError = e.message;
@@ -572,41 +923,21 @@ function getOriginalState(computeGraph) {
 }
 
 async function runSandbox(originalGraph, instructions) {
-  if (semaphore.getAvailable() <= 0) {
+  if (!semaphore.tryAcquire()) {
     const error = new Error('沙箱并发数已达上限，请稍后再试');
     error.statusCode = 429;
     throw error;
   }
-  await semaphore.acquire();
-  const sandbox = new Sandbox(originalGraph);
+
+  let result;
   const originalState = getOriginalState(originalGraph);
-  let timeoutId = null;
+  
   try {
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => {
-        sandbox.timedOut = true;
-        reject(new Error('沙箱执行超时'));
-      }, MAX_EXECUTION_TIME_MS);
-    });
-    const executionPromise = Promise.resolve(sandbox.execute(instructions));
-    let result;
-    try {
-      result = await Promise.race([executionPromise, timeoutPromise]);
-    } catch (e) {
-      if (sandbox.timedOut) {
-        result = {
-          frames: sandbox.frames,
-          fatalError: null,
-          timedOut: true
-        };
-      } else {
-        throw e;
-      }
-    } finally {
-      clearTimeout(timeoutId);
-    }
+    const sandbox = new Sandbox(originalGraph, MAX_EXECUTION_TIME_MS);
+    result = sandbox.execute(instructions);
     const finalState = sandbox.getFinalState();
     const diff = compareStates(originalState, finalState);
+    
     return {
       frames: result.frames,
       fatalError: result.fatalError,
@@ -629,5 +960,6 @@ module.exports = {
   getAvailableSlots,
   MAX_CONCURRENT_SANDBOXES,
   MAX_EXECUTION_TIME_MS,
-  MAX_INSTRUCTIONS
+  MAX_INSTRUCTIONS,
+  ExecutionTimeoutError
 };
