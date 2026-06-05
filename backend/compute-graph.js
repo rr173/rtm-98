@@ -1,4 +1,5 @@
 const { parseExpression, evaluateExpression, traceExpression, StructuredError, findCellRefPosition } = require('./expression-parser');
+const { PerfTracker } = require('./perf-tracker');
 
 const MAX_CELLS = 200;
 const NAME_PATTERN = /^[a-zA-Z][a-zA-Z0-9_]*$/;
@@ -13,6 +14,11 @@ class ComputeGraph {
     this.maxCells = maxCells || MAX_CELLS;
     this.crossNamespaceResolver = null;
     this.crossDepValidator = null;
+    this.perfTracker = new PerfTracker();
+  }
+
+  getPerfTracker() {
+    return this.perfTracker;
   }
 
   setCrossNamespaceResolver(resolver) {
@@ -181,10 +187,12 @@ class ComputeGraph {
     const cell = this.cells.get(name);
     if (!cell) throw new Error(`单元格 '${name}' 不存在`);
 
-    const startTime = Date.now();
+    const startTime = process.hrtime.bigint();
 
     if (cell.type === 'constant') {
-      cell.computeTimeMs = Date.now() - startTime;
+      const durationNs = process.hrtime.bigint() - startTime;
+      cell.computeTimeNs = durationNs;
+      cell.computeTimeMs = Number((Number(durationNs) / 1_000_000).toFixed(2));
       return cell.value;
     }
 
@@ -199,18 +207,25 @@ class ComputeGraph {
         cell.value = result;
         cell.error = null;
         cell.structuredError = null;
-        cell.computeTimeMs = Date.now() - startTime;
+        const durationNs = process.hrtime.bigint() - startTime;
+        cell.computeTimeNs = durationNs;
+        cell.computeTimeMs = Number((Number(durationNs) / 1_000_000).toFixed(2));
         return result;
       } catch (e) {
         cell.error = e.message;
         cell.structuredError = e instanceof StructuredError ? e.toJSON() : null;
-        cell.computeTimeMs = Date.now() - startTime;
+        const durationNs = process.hrtime.bigint() - startTime;
+        cell.computeTimeNs = durationNs;
+        cell.computeTimeMs = Number((Number(durationNs) / 1_000_000).toFixed(2));
         throw e;
       }
     }
   }
 
   recalculate(changedNames) {
+    const triggerSource = changedNames.length > 0 ? changedNames.join(',') : 'unknown';
+    const perfData = this.perfTracker.startRecalculation(triggerSource);
+
     const downstream = this.getDownstreamSubgraph(changedNames);
     const allAffected = Array.from(new Set([...changedNames, ...downstream]));
     const sorted = this.topologicalSort(allAffected);
@@ -224,6 +239,7 @@ class ComputeGraph {
 
       try {
         this.computeCell(name);
+        this.perfTracker.recordNodeTiming(perfData, name, cell.computeTimeNs);
         const newValue = cell.value;
         if (!oldValue || oldValue.value !== newValue.value || oldValue.type !== newValue.type) {
           changes.push({
@@ -234,9 +250,12 @@ class ComputeGraph {
           });
         }
       } catch (e) {
+        this.perfTracker.recordNodeTiming(perfData, name, cell.computeTimeNs);
         errors.push({ name, error: e.message });
       }
     }
+
+    this.perfTracker.endRecalculation(perfData);
 
     return { changes, errors };
   }
@@ -315,6 +334,7 @@ class ComputeGraph {
       ast,
       value: null,
       error: null,
+      computeTimeNs: 0n,
       computeTimeMs: 0,
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -328,7 +348,7 @@ class ComputeGraph {
 
     const { changes, errors } = this.recalculate([name]);
 
-    return { cell, changes, errors };
+    return { cell: this.getCell(name), changes, errors };
   }
 
   updateCell(name, cellType, rawValue) {
@@ -368,7 +388,7 @@ class ComputeGraph {
 
     const { changes, errors } = this.recalculate([name]);
 
-    return { cell: existingCell, changes, errors };
+    return { cell: this.getCell(name), changes, errors };
   }
 
   renameCell(oldName, newName) {
@@ -394,7 +414,7 @@ class ComputeGraph {
     this.cells.set(newName, cell);
     this.cells.delete(oldName);
 
-    return { cell, changes: [], errors: [] };
+    return { cell: this.getCell(newName), changes: [], errors: [] };
   }
 
   deleteCell(name) {
@@ -614,6 +634,7 @@ class ComputeGraph {
           value: null,
           error: null,
           structuredError: null,
+          computeTimeNs: 0n,
           computeTimeMs: 0,
           createdAt: Date.now(),
           updatedAt: Date.now()
@@ -782,9 +803,15 @@ class ComputeGraph {
   }
 
   recalculateWithCrossDeps(changedNames) {
+    const triggerSource = changedNames.length > 0 ? changedNames.join(',') : 'cross-namespace';
+    const perfData = this.perfTracker.startRecalculation(triggerSource);
+
     const downstream = this.getDownstreamSubgraph(changedNames);
     const allAffected = Array.from(new Set([...changedNames, ...downstream]));
-    if (allAffected.length === 0) return { changes: [], errors: [] };
+    if (allAffected.length === 0) {
+      this.perfTracker.endRecalculation(perfData);
+      return { changes: [], errors: [] };
+    }
 
     const sorted = this.topologicalSort(allAffected);
 
@@ -798,6 +825,7 @@ class ComputeGraph {
 
       try {
         this.computeCell(name);
+        this.perfTracker.recordNodeTiming(perfData, name, cell.computeTimeNs);
         const newValue = cell.value;
         if (!oldValue || oldValue.value !== newValue.value || oldValue.type !== newValue.type) {
           changes.push({
@@ -808,9 +836,12 @@ class ComputeGraph {
           });
         }
       } catch (e) {
+        this.perfTracker.recordNodeTiming(perfData, name, cell.computeTimeNs);
         errors.push({ name, error: e.message });
       }
     }
+
+    this.perfTracker.endRecalculation(perfData);
 
     return { changes, errors };
   }

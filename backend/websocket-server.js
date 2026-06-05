@@ -174,6 +174,23 @@ class WebSocketManager {
     }
     return count;
   }
+
+  broadcastPerfAlert(alertData, namespace = null) {
+    const message = JSON.stringify({
+      type: 'perf_alert',
+      data: alertData
+    });
+
+    for (const info of this.clients.values()) {
+      const shouldSend = namespace 
+        ? info.namespace === namespace 
+        : !info.namespace;
+      
+      if (shouldSend && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
 }
 
 module.exports = { WebSocketManager };

@@ -11,6 +11,11 @@ class NamespaceManager {
   constructor(adminKey) {
     this.adminKey = adminKey || 'admin-secret-key';
     this.namespaces = new Map();
+    this.perfAlertCallback = null;
+  }
+
+  setPerfAlertCallback(callback) {
+    this.perfAlertCallback = callback;
   }
 
   generateKey() {
@@ -64,6 +69,13 @@ class NamespaceManager {
     };
 
     this.namespaces.set(name, ns);
+
+    if (this.perfAlertCallback) {
+      computeGraph.getPerfTracker().setOnAlertCallback((alert) => {
+        this.perfAlertCallback(alert, name);
+      });
+    }
+
     return { name, key, createdAt: ns.createdAt };
   }
 

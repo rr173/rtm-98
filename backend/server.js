@@ -10,6 +10,7 @@ const { NamespaceManager } = require('./namespace-manager');
 const { TemplateManager } = require('./template-manager');
 const { demoCells, demoNamespaces, demoSandboxScript } = require('./demo-data');
 const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./sandbox-engine');
+const { globalPerfTracker } = require('./perf-tracker');
 
 const app = express();
 const server = http.createServer(app);
@@ -28,6 +29,14 @@ const nsManager = new NamespaceManager(ADMIN_KEY);
 const templateManager = new TemplateManager(ADMIN_KEY);
 wsManager.setNamespaceManager(nsManager);
 wsManager.attach(server);
+
+computeGraph.getPerfTracker().setOnAlertCallback((alert) => {
+  wsManager.broadcastPerfAlert(alert, null);
+});
+
+nsManager.setPerfAlertCallback((alert, namespace) => {
+  wsManager.broadcastPerfAlert(alert, namespace);
+});
 
 function getOperator(req) {
   return req.headers['x-operator-id'] || 'anonymous';
@@ -187,8 +196,46 @@ function getAuditEngine(req) {
   return auditEngine;
 }
 
+function getPerfTracker(req) {
+  if (req.namespace && req.nsInfo) {
+    return req.nsInfo.computeGraph.getPerfTracker();
+  }
+  return computeGraph.getPerfTracker();
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', onlineCount: wsManager.getOnlineCount() });
+});
+
+app.get('/api/perf/recent', requireNamespace, (req, res) => {
+  const perfTracker = getPerfTracker(req);
+  const limit = req.query.limit ? Math.min(Number(req.query.limit), 50) : 50;
+  res.json({ records: perfTracker.getRecentRecords(limit) });
+});
+
+app.get('/api/perf/cells', requireNamespace, (req, res) => {
+  const perfTracker = getPerfTracker(req);
+  res.json({ cells: perfTracker.getCellStats() });
+});
+
+app.get('/api/perf/heatmap', requireNamespace, (req, res) => {
+  const perfTracker = getPerfTracker(req);
+  res.json(perfTracker.getHeatmapData());
+});
+
+app.post('/api/perf/threshold', requireNamespace, (req, res) => {
+  const { thresholdMs } = req.body;
+  if (thresholdMs === undefined || thresholdMs === null || isNaN(Number(thresholdMs))) {
+    return res.status(400).json({ error: '必须提供有效的 thresholdMs 参数' });
+  }
+  const perfTracker = getPerfTracker(req);
+  perfTracker.setThreshold(Number(thresholdMs));
+  res.json({ success: true, thresholdMs: perfTracker.getThreshold() });
+});
+
+app.get('/api/perf/threshold', requireNamespace, (req, res) => {
+  const perfTracker = getPerfTracker(req);
+  res.json({ thresholdMs: perfTracker.getThreshold() });
 });
 
 app.get('/api/cells', requireNamespace, (req, res) => {
