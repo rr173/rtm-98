@@ -4,6 +4,7 @@ const { SnapshotManager } = require('./snapshot-manager');
 const { AuditEngine } = require('./audit-engine');
 const { RuleEngine } = require('./rule-engine');
 const { BaselineEngine } = require('./baseline-engine');
+const { LockManager } = require('./lock-manager');
 
 const MAX_NAMESPACES = 50;
 const MAX_CELLS_PER_NAMESPACE = 500;
@@ -58,6 +59,7 @@ class NamespaceManager {
     const auditEngine = new AuditEngine();
     const ruleEngine = new RuleEngine();
     const baselineEngine = new BaselineEngine();
+    const lockManager = new LockManager();
 
     const crossNamespaceResolver = (ns, cellName) => {
       return this.resolveCrossNamespaceRef(name, ns, cellName);
@@ -78,6 +80,7 @@ class NamespaceManager {
       auditEngine,
       ruleEngine,
       baselineEngine,
+      lockManager,
       publishedCells: new Set(),
       createdAt: Date.now()
     };
@@ -115,6 +118,9 @@ class NamespaceManager {
       }
     }
 
+    if (ns.lockManager) {
+      ns.lockManager.stop();
+    }
     this.namespaces.delete(name);
     return { success: true, deleted: name };
   }
@@ -147,6 +153,9 @@ class NamespaceManager {
       }
     }
 
+    if (ns.lockManager) {
+      ns.lockManager.stop();
+    }
     this.namespaces.delete(name);
 
     for (const [nsName, cells] of affectedNamespaces.entries()) {

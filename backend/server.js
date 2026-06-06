@@ -14,6 +14,7 @@ const { runSandbox, getAvailableSlots, MAX_CONCURRENT_SANDBOXES } = require('./s
 const { RuleEngine } = require('./rule-engine');
 const { globalPerfTracker } = require('./perf-tracker');
 const { ScheduleEngine, MAX_SCHEDULES } = require('./schedule-engine');
+const { LockManager } = require('./lock-manager');
 
 const app = express();
 const server = http.createServer(app);
@@ -33,9 +34,11 @@ const templateManager = new TemplateManager(ADMIN_KEY);
 const ruleEngine = new RuleEngine();
 const baselineEngine = new BaselineEngine();
 const scheduleEngine = new ScheduleEngine();
+const globalLockManager = new LockManager();
 ruleEngine.setWebSocketManager(wsManager);
 wsManager.setNamespaceManager(nsManager);
 nsManager.setWebSocketManager(wsManager);
+wsManager.setGlobalLockManager(globalLockManager);
 wsManager.attach(server);
 scheduleEngine.setWebSocketManager(wsManager);
 scheduleEngine.setContextProvider(null, () => ({
@@ -104,6 +107,10 @@ function loadDemoNamespaces() {
       console.log(`命名空间 '${nsDef.name}' 已创建，管理密钥: ${ns.key}`);
 
       const nsObj = nsManager.getNamespace(nsDef.name);
+      if (nsObj && nsObj.lockManager) {
+        setupLockManagerCallbacks(nsObj.lockManager, nsDef.name);
+      }
+
       for (const cellName of nsDef.publishedCells) {
         const cell = nsDef.cells.find(c => c.name === cellName);
         if (cell) {
@@ -237,6 +244,53 @@ function getScheduleEngine(req) {
   return scheduleEngine;
 }
 
+function getLockManager(req) {
+  if (req.namespace && req.nsInfo) {
+    return req.nsInfo.lockManager;
+  }
+  return globalLockManager;
+}
+
+function isAdmin(req) {
+  const adminKey = req.headers['x-admin-key'];
+  return !!(adminKey && adminKey === ADMIN_KEY);
+}
+
+function getLockToken(req) {
+  return req.headers['x-lock-token'] || null;
+}
+
+function augmentCellWithLockInfo(cell, lockManager) {
+  if (!cell) return cell;
+  if (!lockManager) return { ...cell, locked: false, lockedBy: null };
+  const lockInfo = lockManager.getLockInfo(cell.name);
+  if (lockInfo) {
+    return { ...cell, locked: true, lockedBy: lockInfo.lockedBy };
+  }
+  return { ...cell, locked: false, lockedBy: null };
+}
+
+function augmentCellsWithLockInfo(cells, lockManager) {
+  if (!lockManager) return cells.map(c => ({ ...c, locked: false, lockedBy: null }));
+  return cells.map(cell => augmentCellWithLockInfo(cell, lockManager));
+}
+
+function setupLockManagerCallbacks(lockManager, namespace) {
+  lockManager.setCallbacks(
+    (name, lockedBy, expiresAt) => {
+      wsManager.broadcastCellLocked(name, lockedBy, expiresAt, namespace);
+    },
+    (name) => {
+      wsManager.broadcastCellUnlocked(name, namespace);
+    },
+    (name) => {
+      wsManager.broadcastCellUnlocked(name, namespace);
+    }
+  );
+}
+
+setupLockManagerCallbacks(globalLockManager, null);
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', onlineCount: wsManager.getOnlineCount() });
 });
@@ -274,7 +328,9 @@ app.get('/api/perf/threshold', requireNamespace, (req, res) => {
 
 app.get('/api/cells', requireNamespace, (req, res) => {
   const graph = getComputeGraph(req);
-  res.json({ cells: graph.getAllCells() });
+  const lockManager = getLockManager(req);
+  const cells = augmentCellsWithLockInfo(graph.getAllCells(), lockManager);
+  res.json({ cells });
 });
 
 app.get('/api/cells/export', requireNamespace, (req, res) => {
@@ -327,11 +383,12 @@ app.post('/api/cells/import', requireNamespace, (req, res) => {
 
 app.get('/api/cells/:name', requireNamespace, (req, res) => {
   const graph = getComputeGraph(req);
+  const lockManager = getLockManager(req);
   const cell = graph.getCell(req.params.name);
   if (!cell) {
     return res.status(404).json({ error: `单元格 '${req.params.name}' 不存在` });
   }
-  res.json({ cell });
+  res.json({ cell: augmentCellWithLockInfo(cell, lockManager) });
 });
 
 app.get('/api/cells/:name/compiled', requireNamespace, (req, res) => {
@@ -395,6 +452,16 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
+
+  if (!lockManager.checkAccess(name, token, admin)) {
+    return res.status(423).json({
+      error: `单元格 '${name}' 已被锁定，需要有效的 X-Lock-Token`,
+      locked: true
+    });
+  }
 
   if (renameTo) {
     try {
@@ -464,8 +531,18 @@ app.delete('/api/cells/:name', requireNamespace, (req, res) => {
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
   const existingCell = graph.getCell(req.params.name);
   const oldDef = existingCell ? { type: existingCell.type, rawValue: existingCell.rawValue } : null;
+
+  if (!lockManager.checkAccess(req.params.name, token, admin)) {
+    return res.status(423).json({
+      error: `单元格 '${req.params.name}' 已被锁定，需要有效的 X-Lock-Token`,
+      locked: true
+    });
+  }
 
   try {
     graph.deleteCell(req.params.name);
@@ -492,9 +569,24 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
 
   if (!Array.isArray(cells)) {
     return res.status(400).json({ error: 'cells 必须是数组' });
+  }
+
+  const targetNames = cells.map(c => c.renameTo || c.name);
+  const lockedCells = lockManager.getLockedNames(targetNames, token, admin);
+  if (lockedCells.length > 0) {
+    return res.status(423).json({
+      error: '批量操作被拒绝，部分单元格已被锁定',
+      lockedCells: lockedCells.map(lc => ({
+        name: lc.name,
+        lockedBy: lc.lockedBy
+      }))
+    });
   }
 
   const beforeDefs = {};
@@ -546,6 +638,69 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+app.post('/api/cells/:name/lock', requireNamespace, (req, res) => {
+  const { name } = req.params;
+  const graph = getComputeGraph(req);
+  const lockManager = getLockManager(req);
+  const operator = getOperator(req);
+
+  if (!graph.cells.has(name)) {
+    return res.status(404).json({ error: `单元格 '${name}' 不存在` });
+  }
+
+  try {
+    const result = lockManager.lock(name, operator);
+    res.json({
+      success: true,
+      name,
+      lockToken: result.lockToken,
+      expiresAt: result.expiresAt
+    });
+  } catch (e) {
+    const statusCode = e.statusCode || 400;
+    res.status(statusCode).json({ error: e.message });
+  }
+});
+
+app.delete('/api/cells/:name/lock', requireNamespace, (req, res) => {
+  const { name } = req.params;
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
+
+  try {
+    const result = lockManager.unlock(name, token, admin);
+    res.json(result);
+  } catch (e) {
+    const statusCode = e.statusCode || 400;
+    res.status(statusCode).json({ error: e.message });
+  }
+});
+
+app.put('/api/cells/:name/lock/renew', requireNamespace, (req, res) => {
+  const { name } = req.params;
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
+
+  try {
+    const result = lockManager.renew(name, token, admin);
+    res.json({
+      success: true,
+      name,
+      expiresAt: result.expiresAt
+    });
+  } catch (e) {
+    const statusCode = e.statusCode || 400;
+    res.status(statusCode).json({ error: e.message });
+  }
+});
+
+app.get('/api/locks', requireNamespace, (req, res) => {
+  const lockManager = getLockManager(req);
+  res.json({ locks: lockManager.getAllLocks() });
 });
 
 app.get('/api/cache/stats', requireNamespace, (req, res) => {
@@ -661,10 +816,29 @@ app.post('/api/snapshots/:id/restore', requireNamespace, (req, res) => {
   const snapMgr = getSnapshotManager(req);
   const audit = getAuditEngine(req);
   const operator = getOperator(req);
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
 
   const targetSnapshot = snapMgr.getSnapshot(req.params.id);
   if (!targetSnapshot) {
     return res.status(404).json({ error: '快照不存在' });
+  }
+
+  if (!admin) {
+    const snapshotCellNames = Object.keys(targetSnapshot.cells);
+    const currentCellNames = Array.from(graph.cells.keys());
+    const allAffectedNames = Array.from(new Set([...snapshotCellNames, ...currentCellNames]));
+    const lockedCells = lockManager.getLockedNames(allAffectedNames, token, false);
+    if (lockedCells.length > 0) {
+      return res.status(423).json({
+        error: '快照恢复被拒绝，部分单元格已被锁定。使用 X-Admin-Key 可强制跳过锁检查。',
+        lockedCells: lockedCells.map(lc => ({
+          name: lc.name,
+          lockedBy: lc.lockedBy
+        }))
+      });
+    }
   }
 
   const beforeDefs = {};
@@ -1070,6 +1244,10 @@ app.post('/api/namespaces', (req, res) => {
   }
   try {
     const ns = nsManager.createNamespace(name);
+    const nsObj = nsManager.getNamespace(name);
+    if (nsObj && nsObj.lockManager) {
+      setupLockManagerCallbacks(nsObj.lockManager, name);
+    }
     res.json(ns);
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1107,7 +1285,8 @@ app.get('/api/namespaces/:name/cells', requireAdmin, (req, res) => {
   if (!ns) {
     return res.status(404).json({ error: `命名空间 '${req.params.name}' 不存在` });
   }
-  res.json({ cells: ns.computeGraph.getAllCells() });
+  const cells = augmentCellsWithLockInfo(ns.computeGraph.getAllCells(), ns.lockManager);
+  res.json({ cells });
 });
 
 app.post('/api/namespaces/:name/publish', requireNamespaceStrict, (req, res) => {
@@ -1272,6 +1451,10 @@ function loadDemoTemplate() {
     }
 
     const demoNsObj = nsManager.getNamespace(demoNsName);
+    if (demoNsObj && demoNsObj.lockManager) {
+      setupLockManagerCallbacks(demoNsObj.lockManager, demoNsName);
+    }
+
     for (const cell of demoCells) {
       if (!demoNsObj.computeGraph.cells.has(cell.name)) {
         try {
@@ -1642,5 +1825,6 @@ server.listen(PORT, () => {
   console.log(`模板市场已启用 (最多 ${templateManager.constructor.MAX_TEMPLATES || 100} 个模板)`);
   console.log(`基线回归引擎已启用 (最多 ${baselineEngine.constructor.MAX_BASELINES || 30} 条基线)`);
   console.log(`定时调度引擎已启用 (最多 ${MAX_SCHEDULES} 个调度任务)`);
+  console.log(`单元格访问控制已启用 (锁有效期5分钟，每10秒自动扫描过期)`);
   console.log(`管理员密钥已配置 (ADMIN_KEY 环境变量${ADMIN_KEY === 'admin-secret-key' ? '，使用默认值' : ''})`);
 });

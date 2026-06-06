@@ -7,10 +7,15 @@ class WebSocketManager {
     this.clients = new Map();
     this.clientId = 0;
     this.nsManager = null;
+    this.globalLockManager = null;
   }
 
   setNamespaceManager(nsManager) {
     this.nsManager = nsManager;
+  }
+
+  setGlobalLockManager(lockManager) {
+    this.globalLockManager = lockManager;
   }
 
   attach(server) {
@@ -29,10 +34,11 @@ class WebSocketManager {
       if (namespace && this.nsManager) {
         const ns = this.nsManager.getNamespace(namespace);
         if (ns) {
+          const cellsWithLocks = this._augmentCellsWithLockInfo(ns.computeGraph.getAllCells(), namespace);
           ws.send(JSON.stringify({
             type: 'init',
             data: {
-              cells: ns.computeGraph.getAllCells(),
+              cells: cellsWithLocks,
               clientId: id,
               onlineCount: this.getNamespaceOnlineCount(namespace),
               namespace
@@ -51,10 +57,11 @@ class WebSocketManager {
           }));
         }
       } else {
+        const cellsWithLocks = this._augmentCellsWithLockInfo(this.computeGraph.getAllCells(), null);
         ws.send(JSON.stringify({
           type: 'init',
           data: {
-            cells: this.computeGraph.getAllCells(),
+            cells: cellsWithLocks,
             clientId: id,
             onlineCount: this.getOnlineCount(),
             namespace: null
@@ -112,6 +119,34 @@ class WebSocketManager {
     });
   }
 
+  _getLockManagerForNamespace(namespace) {
+    if (namespace && this.nsManager) {
+      const ns = this.nsManager.getNamespace(namespace);
+      if (ns) return ns.lockManager;
+    }
+    return this.globalLockManager;
+  }
+
+  _augmentCellsWithLockInfo(cells, namespace) {
+    const lockManager = this._getLockManagerForNamespace(namespace);
+    if (!lockManager) return cells;
+    return cells.map(cell => {
+      const lockInfo = lockManager.getLockInfo(cell.name);
+      if (lockInfo) {
+        return {
+          ...cell,
+          locked: true,
+          lockedBy: lockInfo.lockedBy
+        };
+      }
+      return {
+        ...cell,
+        locked: false,
+        lockedBy: null
+      };
+    });
+  }
+
   broadcastChanges(changes, sourceClientId = null) {
     if (changes.length === 0) return;
     const sanitized = this.sanitizeChangesForBroadcast(changes);
@@ -153,9 +188,10 @@ class WebSocketManager {
   }
 
   broadcastRestore() {
+    const cellsWithLocks = this._augmentCellsWithLockInfo(this.computeGraph.getAllCells(), null);
     const message = JSON.stringify({
       type: 'restore',
-      data: { cells: this.computeGraph.getAllCells() }
+      data: { cells: cellsWithLocks }
     });
     for (const info of this.clients.values()) {
       if (!info.namespace && info.ws.readyState === WebSocket.OPEN) {
@@ -167,9 +203,10 @@ class WebSocketManager {
   broadcastRestoreToNamespace(namespace) {
     const ns = this.nsManager ? this.nsManager.getNamespace(namespace) : null;
     if (!ns) return;
+    const cellsWithLocks = this._augmentCellsWithLockInfo(ns.computeGraph.getAllCells(), namespace);
     const message = JSON.stringify({
       type: 'restore',
-      data: { cells: ns.computeGraph.getAllCells(), namespace }
+      data: { cells: cellsWithLocks, namespace }
     });
     for (const info of this.clients.values()) {
       if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
@@ -309,6 +346,42 @@ class WebSocketManager {
 
     for (const info of this.clients.values()) {
       if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastCellLocked(cellName, lockedBy, expiresAt, namespace = null) {
+    const message = JSON.stringify({
+      type: 'cell_locked',
+      name: cellName,
+      lockedBy,
+      expiresAt,
+      namespace
+    });
+
+    for (const info of this.clients.values()) {
+      const shouldSend = namespace
+        ? info.namespace === namespace
+        : !info.namespace;
+      if (shouldSend && info.ws.readyState === WebSocket.OPEN) {
+        info.ws.send(message);
+      }
+    }
+  }
+
+  broadcastCellUnlocked(cellName, namespace = null) {
+    const message = JSON.stringify({
+      type: 'cell_unlocked',
+      name: cellName,
+      namespace
+    });
+
+    for (const info of this.clients.values()) {
+      const shouldSend = namespace
+        ? info.namespace === namespace
+        : !info.namespace;
+      if (shouldSend && info.ws.readyState === WebSocket.OPEN) {
         info.ws.send(message);
       }
     }
