@@ -345,10 +345,29 @@ app.post('/api/cells/import', requireNamespace, (req, res) => {
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
+  const lockManager = getLockManager(req);
+  const token = getLockToken(req);
+  const admin = isAdmin(req);
   const beforeDefs = {};
 
   for (const [name, cell] of graph.cells.entries()) {
     beforeDefs[name] = { type: cell.type, rawValue: cell.rawValue };
+  }
+
+  if (!admin && data && Array.isArray(data.cells)) {
+    const importNames = data.cells.map(c => c.name);
+    const currentNames = Array.from(graph.cells.keys());
+    const allAffectedNames = Array.from(new Set([...importNames, ...currentNames]));
+    const lockedCells = lockManager.getLockedNames(allAffectedNames, token, false);
+    if (lockedCells.length > 0) {
+      return res.status(423).json({
+        error: '导入被拒绝，部分单元格已被锁定。使用 X-Admin-Key 可强制跳过锁检查。',
+        lockedCells: lockedCells.map(lc => ({
+          name: lc.name,
+          lockedBy: lc.lockedBy
+        }))
+      });
+    }
   }
 
   try {
@@ -465,10 +484,25 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
 
   if (renameTo) {
     try {
+      if (!lockManager.checkAccess(renameTo, token, admin)) {
+        return res.status(423).json({
+          error: `目标单元格 '${renameTo}' 已被锁定，需要有效的 X-Lock-Token`,
+          locked: true
+        });
+      }
+
       const existingCell = graph.getCell(name);
       const oldDef = existingCell ? { type: existingCell.type, rawValue: existingCell.rawValue } : null;
 
       const { cell, changes } = graph.renameCell(name, renameTo);
+
+      try {
+        lockManager.renameLock(name, renameTo, token, admin);
+      } catch (lockErr) {
+        graph.renameCell(renameTo, name);
+        const statusCode = lockErr.statusCode || 400;
+        return res.status(statusCode).json({ error: lockErr.message });
+      }
 
       if (req.namespace) {
         wsManager.broadcastChangesToNamespace(req.namespace, changes);
@@ -577,8 +611,14 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
     return res.status(400).json({ error: 'cells 必须是数组' });
   }
 
-  const targetNames = cells.map(c => c.renameTo || c.name);
-  const lockedCells = lockManager.getLockedNames(targetNames, token, admin);
+  const allAffectedNames = new Set();
+  for (const c of cells) {
+    allAffectedNames.add(c.name);
+    if (c.renameTo) {
+      allAffectedNames.add(c.renameTo);
+    }
+  }
+  const lockedCells = lockManager.getLockedNames(Array.from(allAffectedNames), token, admin);
   if (lockedCells.length > 0) {
     return res.status(423).json({
       error: '批量操作被拒绝，部分单元格已被锁定',
@@ -594,8 +634,43 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
     beforeDefs[name] = { type: cell.type, rawValue: cell.rawValue };
   }
 
+  const graphSnapshot = graph.snapshot();
+
   try {
     const { changes, errors } = graph.batchCreateOrUpdate(cells);
+
+    const renamedPairs = cells.filter(c => c.renameTo);
+    const lockRollbacks = [];
+    let lockFailed = false;
+    let lockError = null;
+    let lockStatusCode = 400;
+
+    for (const rc of renamedPairs) {
+      try {
+        const result = lockManager.renameLock(rc.name, rc.renameTo, token, admin);
+        if (result.renamed) {
+          lockRollbacks.push({ from: rc.renameTo, to: rc.name });
+        }
+      } catch (lockErr) {
+        lockFailed = true;
+        lockError = lockErr.message;
+        lockStatusCode = lockErr.statusCode || 400;
+        for (let i = lockRollbacks.length - 1; i >= 0; i--) {
+          const rb = lockRollbacks[i];
+          try {
+            lockManager.renameLock(rb.from, rb.to, token, admin);
+          } catch (_) {}
+        }
+        break;
+      }
+    }
+
+    if (lockFailed) {
+      try {
+        graph.restore(graphSnapshot);
+      } catch (_) {}
+      return res.status(lockStatusCode).json({ error: lockError });
+    }
 
     if (req.namespace) {
       wsManager.broadcastChangesToNamespace(req.namespace, changes);

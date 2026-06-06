@@ -163,6 +163,36 @@ class LockManager {
     return { expiresAt };
   }
 
+  renameLock(oldName, newName, token, isAdmin) {
+    const oldLock = this.locks.get(oldName);
+    if (!oldLock) {
+      return { renamed: false, reason: 'not_locked' };
+    }
+    if (oldLock.expiresAt <= this._now()) {
+      this._removeLock(oldName, 'expire');
+      return { renamed: false, reason: 'expired' };
+    }
+    if (!isAdmin && token !== oldLock.token) {
+      const err = new Error('锁令牌不匹配');
+      err.statusCode = 403;
+      throw err;
+    }
+    if (this.isLocked(newName)) {
+      const err = new Error(`目标单元格 '${newName}' 已被锁定，无法迁移锁`);
+      err.statusCode = 409;
+      throw err;
+    }
+    this.locks.delete(oldName);
+    this.locks.set(newName, oldLock);
+    if (this.onUnlock) {
+      this.onUnlock(oldName);
+    }
+    if (this.onLock) {
+      this.onLock(newName, oldLock.lockedBy, oldLock.expiresAt);
+    }
+    return { renamed: true, newName, oldName };
+  }
+
   _removeLock(cellName, reason) {
     const lock = this.locks.get(cellName);
     if (!lock) return;
