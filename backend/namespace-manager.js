@@ -5,6 +5,7 @@ const { AuditEngine } = require('./audit-engine');
 const { RuleEngine } = require('./rule-engine');
 const { BaselineEngine } = require('./baseline-engine');
 const { LockManager } = require('./lock-manager');
+const { WebhookEngine } = require('./webhook-engine');
 
 const MAX_NAMESPACES = 50;
 const MAX_CELLS_PER_NAMESPACE = 500;
@@ -60,6 +61,7 @@ class NamespaceManager {
     const ruleEngine = new RuleEngine();
     const baselineEngine = new BaselineEngine();
     const lockManager = new LockManager();
+    const webhookEngine = new WebhookEngine();
 
     const crossNamespaceResolver = (ns, cellName) => {
       return this.resolveCrossNamespaceRef(name, ns, cellName);
@@ -81,6 +83,7 @@ class NamespaceManager {
       ruleEngine,
       baselineEngine,
       lockManager,
+      webhookEngine,
       publishedCells: new Set(),
       createdAt: Date.now()
     };
@@ -336,6 +339,9 @@ class NamespaceManager {
       const { changes, errors } = ns.computeGraph.recalculateWithCrossDeps(changedArray);
       if (wsManager && changes.length > 0) {
         wsManager.broadcastChangesToNamespace(nsName, changes);
+      }
+      if (ns.webhookEngine && changes.length > 0) {
+        ns.webhookEngine.processChanges(ns.computeGraph, changes);
       }
     }
   }

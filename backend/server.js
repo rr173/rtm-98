@@ -15,6 +15,7 @@ const { RuleEngine } = require('./rule-engine');
 const { globalPerfTracker } = require('./perf-tracker');
 const { ScheduleEngine, MAX_SCHEDULES } = require('./schedule-engine');
 const { LockManager } = require('./lock-manager');
+const { WebhookEngine, MAX_WEBHOOKS } = require('./webhook-engine');
 
 const app = express();
 const server = http.createServer(app);
@@ -35,6 +36,7 @@ const ruleEngine = new RuleEngine();
 const baselineEngine = new BaselineEngine();
 const scheduleEngine = new ScheduleEngine();
 const globalLockManager = new LockManager();
+const webhookEngine = new WebhookEngine();
 ruleEngine.setWebSocketManager(wsManager);
 wsManager.setNamespaceManager(nsManager);
 nsManager.setWebSocketManager(wsManager);
@@ -46,6 +48,7 @@ scheduleEngine.setContextProvider(null, () => ({
   snapshotManager,
   baselineEngine,
   wsManager,
+  webhookEngine,
   namespace: null
 }));
 
@@ -251,6 +254,13 @@ function getLockManager(req) {
   return globalLockManager;
 }
 
+function getWebhookEngine(req) {
+  if (req.namespace && req.nsInfo) {
+    return req.nsInfo.webhookEngine;
+  }
+  return webhookEngine;
+}
+
 function isAdmin(req) {
   const adminKey = req.headers['x-admin-key'];
   return !!(adminKey && adminKey === ADMIN_KEY);
@@ -394,6 +404,11 @@ app.post('/api/cells/import', requireNamespace, (req, res) => {
       }
     }
 
+    const webhooks = getWebhookEngine(req);
+    if (changes.length > 0) {
+      webhooks.processChanges(graph, changes);
+    }
+
     res.json({ success: true, changes, errors });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -450,8 +465,10 @@ app.post('/api/cells', requireNamespace, (req, res) => {
     }
 
     const rules = getRuleEngine(req);
+    const webhooks = getWebhookEngine(req);
     if (changes.length > 0) {
       rules.checkRules(graph, req.namespace);
+      webhooks.processChanges(graph, changes);
     }
 
     audit.append('create', operator, name, null, { type, rawValue: value, lazy: !!lazy });
@@ -513,7 +530,9 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
       }
 
       const rules = getRuleEngine(req);
+      const webhooks = getWebhookEngine(req);
       rules.onCellRenamed(name, renameTo);
+      webhooks.onCellRenamed(name, renameTo);
 
       audit.append('delete', operator, name, oldDef, null);
       audit.append('create', operator, renameTo, null, { type: cell.type, rawValue: cell.rawValue });
@@ -546,8 +565,10 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
     }
 
     const rules = getRuleEngine(req);
+    const webhooks = getWebhookEngine(req);
     if (changes.length > 0) {
       rules.checkRules(graph, req.namespace);
+      webhooks.processChanges(graph, changes);
     }
 
     audit.append('update', operator, name, oldDef, { type, rawValue: value, lazy: lazy !== undefined ? !!lazy : (existingCell ? existingCell.lazy : false) });
@@ -589,7 +610,9 @@ app.delete('/api/cells/:name', requireNamespace, (req, res) => {
     }
 
     const rules = getRuleEngine(req);
+    const webhooks = getWebhookEngine(req);
     rules.onCellDeleted(req.params.name);
+    webhooks.onCellDeleted(req.params.name);
 
     audit.append('delete', operator, req.params.name, oldDef, null);
     res.json({ success: true, deleted: req.params.name });
@@ -705,8 +728,14 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
     }
 
     const rules = getRuleEngine(req);
+    const webhooks = getWebhookEngine(req);
     if (changes.length > 0) {
       rules.checkRules(graph, req.namespace);
+      webhooks.processChanges(graph, changes);
+    }
+
+    for (const rc of renamedPairs) {
+      webhooks.onCellRenamed(rc.name, rc.renameTo);
     }
 
     res.json({ success: true, changes, errors });
@@ -953,7 +982,27 @@ app.post('/api/snapshots/:id/restore', requireNamespace, (req, res) => {
     }
 
     const rules = getRuleEngine(req);
+    const webhooks = getWebhookEngine(req);
     rules.checkRules(graph, req.namespace);
+
+    const restoreChanges = [];
+    for (const name of allNames) {
+      const oldDef = beforeDefs[name] || null;
+      const newDef = afterDefs[name] || null;
+      const cell = graph.cells.get(name);
+      const oldCell = cell ? (oldDef ? (oldDef.type === 'formula' ? null : { value: oldDef.rawValue }) : null) : null;
+      const newCellValue = cell && cell.value ? cell.value.value : null;
+      if ((oldCell ? oldCell.value : null) !== newCellValue) {
+        restoreChanges.push({
+          name,
+          oldValue: oldCell ? oldCell.value : null,
+          newValue: newCellValue
+        });
+      }
+    }
+    if (restoreChanges.length > 0) {
+      webhooks.processChanges(graph, restoreChanges);
+    }
 
     res.json({
       success: true,
@@ -1010,7 +1059,7 @@ app.post('/api/audit/replay', requireNamespace, (req, res) => {
   }
 });
 
-function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, operator, force = true, options = {}) {
+function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, webhooks, operator, force = true, options = {}) {
   const { emitEvents = true, runRules = true } = options;
   const log = audit.getBySeq(seq);
   if (!log) {
@@ -1079,6 +1128,9 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
       if (rules && runRules) {
         rules.onCellDeleted(cellName);
       }
+      if (webhooks && runRules) {
+        webhooks.onCellDeleted(cellName);
+      }
 
       return {
         success: true,
@@ -1131,6 +1183,9 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
       if (rules && runRules) {
         rules.checkRules(graph, namespace);
       }
+      if (webhooks && runRules && changes && changes.length > 0) {
+        webhooks.processChanges(graph, changes);
+      }
 
       return {
         success: true,
@@ -1166,6 +1221,9 @@ function performUndo(seq, graph, audit, wsManager, namespace, nsMgr, rules, oper
     if (rules && runRules) {
       rules.checkRules(graph, namespace);
     }
+    if (webhooks && runRules && changes && changes.length > 0) {
+      webhooks.processChanges(graph, changes);
+    }
 
     return {
       success: true,
@@ -1191,6 +1249,7 @@ app.post('/api/audit/undo/:seq', requireNamespace, (req, res) => {
   const audit = getAuditEngine(req);
   const namespace = req.namespace || null;
   const rules = getRuleEngine(req);
+  const webhooks = getWebhookEngine(req);
 
   if (isNaN(seq)) {
     return res.status(400).json({ error: '无效的 seq 参数' });
@@ -1198,7 +1257,7 @@ app.post('/api/audit/undo/:seq', requireNamespace, (req, res) => {
 
   scheduleEngine.stop();
   try {
-    const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force);
+    const result = performUndo(seq, graph, audit, wsManager, namespace, nsManager, rules, webhooks, operator, force);
 
     if (!result.success) {
       if (result.conflict) {
@@ -1220,6 +1279,7 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
   const audit = getAuditEngine(req);
   const namespace = req.namespace || null;
   const rules = getRuleEngine(req);
+  const webhooks = getWebhookEngine(req);
 
   const from = Number(fromSeq);
   const to = Number(toSeq);
@@ -1243,6 +1303,15 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
   const originalLogsLength = audit.logs.length;
   const originalNextSeq = audit.nextSeq;
 
+  const beforeValues = {};
+  for (const seq of seqs) {
+    const log = audit.getBySeq(seq);
+    if (log && log.cellName) {
+      const cell = graph.cells.get(log.cellName);
+      beforeValues[log.cellName] = cell && cell.value ? cell.value.value : null;
+    }
+  }
+
   const results = [];
   const changedCells = new Set();
   let failed = false;
@@ -1251,7 +1320,7 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
   try {
     for (const seq of seqs) {
       const result = performUndo(
-        seq, graph, audit, wsManager, namespace, nsManager, rules, operator, force,
+        seq, graph, audit, wsManager, namespace, nsManager, rules, webhooks, operator, force,
         { emitEvents: false, runRules: false }
       );
       results.push(result);
@@ -1300,6 +1369,21 @@ app.post('/api/audit/undo-range', requireNamespace, (req, res) => {
 
     if (rules) {
       rules.checkRules(graph, namespace);
+    }
+
+    if (webhooks) {
+      const undoChanges = [];
+      for (const cellName of changedCells) {
+        const cell = graph.cells.get(cellName);
+        const newValue = cell && cell.value ? cell.value.value : null;
+        const oldValue = beforeValues[cellName];
+        if (oldValue !== newValue) {
+          undoChanges.push({ name: cellName, oldValue, newValue });
+        }
+      }
+      if (undoChanges.length > 0) {
+        webhooks.processChanges(graph, undoChanges);
+      }
     }
 
     res.json({
@@ -1504,6 +1588,11 @@ app.post('/api/templates/:id/install', requireNamespaceStrict, (req, res) => {
       }
     }
 
+    const webhooks = getWebhookEngine(req);
+    if (changes.length > 0) {
+      webhooks.processChanges(graph, changes);
+    }
+
     res.json({
       success: true,
       installed: cellsToCreate.map(c => c.name),
@@ -1652,6 +1741,63 @@ app.get('/api/rules/:id/history', requireNamespace, (req, res) => {
     return res.status(404).json({ error: `规则 ${req.params.id} 不存在` });
   }
   res.json({ history });
+});
+
+app.post('/api/webhooks', requireNamespace, (req, res) => {
+  const { cell, condition, url, headers, retries, timeout } = req.body;
+  const graph = getComputeGraph(req);
+  const webhooks = getWebhookEngine(req);
+
+  try {
+    const webhook = webhooks.createWebhook(graph, { cell, condition, url, headers, retries, timeout });
+    res.json(webhook);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.get('/api/webhooks', requireNamespace, (req, res) => {
+  const webhooks = getWebhookEngine(req);
+  res.json({ webhooks: webhooks.listWebhooks() });
+});
+
+app.get('/api/webhooks/:id', requireNamespace, (req, res) => {
+  const webhooks = getWebhookEngine(req);
+  const webhook = webhooks.getWebhook(req.params.id);
+  if (!webhook) {
+    return res.status(404).json({ error: `webhook ${req.params.id} 不存在` });
+  }
+  res.json(webhook);
+});
+
+app.delete('/api/webhooks/:id', requireNamespace, (req, res) => {
+  const webhooks = getWebhookEngine(req);
+  try {
+    const result = webhooks.deleteWebhook(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+app.put('/api/webhooks/:id/pause', requireNamespace, (req, res) => {
+  const webhooks = getWebhookEngine(req);
+  try {
+    const result = webhooks.pauseWebhook(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
+});
+
+app.put('/api/webhooks/:id/resume', requireNamespace, (req, res) => {
+  const webhooks = getWebhookEngine(req);
+  try {
+    const result = webhooks.resumeWebhook(req.params.id);
+    res.json(result);
+  } catch (e) {
+    res.status(404).json({ error: e.message });
+  }
 });
 
 app.post('/api/baselines', requireNamespace, (req, res) => {
@@ -1900,6 +2046,7 @@ server.listen(PORT, () => {
   console.log(`模板市场已启用 (最多 ${templateManager.constructor.MAX_TEMPLATES || 100} 个模板)`);
   console.log(`基线回归引擎已启用 (最多 ${baselineEngine.constructor.MAX_BASELINES || 30} 条基线)`);
   console.log(`定时调度引擎已启用 (最多 ${MAX_SCHEDULES} 个调度任务)`);
+  console.log(`Webhook 推送引擎已启用 (最多 ${MAX_WEBHOOKS} 个订阅)`);
   console.log(`单元格访问控制已启用 (锁有效期5分钟，每10秒自动扫描过期)`);
   console.log(`管理员密钥已配置 (ADMIN_KEY 环境变量${ADMIN_KEY === 'admin-secret-key' ? '，使用默认值' : ''})`);
 });

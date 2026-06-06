@@ -184,7 +184,7 @@ class ScheduleEngine {
   }
 
   async executeSetValue(action, context, scheduleId) {
-    const { computeGraph, wsManager, namespace } = context;
+    const { computeGraph, wsManager, namespace, webhookEngine } = context;
     const { cell, value } = action;
 
     if (!cell) {
@@ -205,6 +205,10 @@ class ScheduleEngine {
       wsManager.broadcastChangesToNamespace(namespace, changes);
     } else {
       wsManager.broadcastChanges(changes);
+    }
+
+    if (webhookEngine && changes.length > 0) {
+      webhookEngine.processChanges(computeGraph, changes);
     }
 
     return {
