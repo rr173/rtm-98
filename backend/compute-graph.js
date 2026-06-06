@@ -577,6 +577,8 @@ class ComputeGraph {
       lastCompileTime: null
     };
 
+    const oldConstantValue = null;
+
     if (cellType === 'constant') {
       cell.value = parsed;
     }
@@ -588,6 +590,17 @@ class ComputeGraph {
     this.cells.set(name, cell);
 
     const { changes, errors } = this.recalculate([name]);
+
+    if (cellType === 'constant') {
+      if (!changes.find(c => c.name === name)) {
+        changes.unshift({
+          name,
+          oldValue: oldConstantValue,
+          newValue: parsed.value,
+          computeTimeMs: cell.computeTimeMs
+        });
+      }
+    }
 
     return { cell: this.getCell(name, { skipLazy: true }), changes, errors };
   }
@@ -629,6 +642,10 @@ class ComputeGraph {
 
     this.invalidateCellCache(existingCell);
 
+    const oldConstantValue = cellType === 'constant' && existingCell.value
+      ? existingCell.value.value
+      : null;
+
     if (cellType === 'constant') {
       existingCell.value = parsed;
     }
@@ -638,6 +655,17 @@ class ComputeGraph {
     }
 
     const { changes, errors } = this.recalculate([name]);
+
+    if (cellType === 'constant') {
+      if (!changes.find(c => c.name === name)) {
+        changes.unshift({
+          name,
+          oldValue: oldConstantValue,
+          newValue: parsed.value,
+          computeTimeMs: existingCell.computeTimeMs
+        });
+      }
+    }
 
     return { cell: this.getCell(name, { skipLazy: true }), changes, errors };
   }
