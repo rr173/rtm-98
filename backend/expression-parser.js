@@ -1099,4 +1099,362 @@ function findCellRefPosition(ast, refName) {
   return null;
 }
 
-module.exports = { parseExpression, evaluateExpression, traceExpression, StructuredError, findCellRefPosition };
+class ExpressionCompiler {
+  constructor(expression) {
+    this.expression = expression;
+  }
+
+  compile(node) {
+    switch (node.type) {
+      case 'Number': {
+        const val = node.value;
+        return () => ({ type: 'number', value: val });
+      }
+
+      case 'String': {
+        const val = node.value;
+        return () => ({ type: 'string', value: val });
+      }
+
+      case 'CellRef': {
+        const refName = node.value;
+        const start = node.start;
+        const end = node.end;
+        const expr = this.expression;
+        return (cellResolver, crossResolver) => {
+          const cell = cellResolver(refName);
+          if (!cell) {
+            throw new StructuredError(
+              `引用的单元格 '${refName}' 不存在`,
+              start, end, expr
+            );
+          }
+          return cell.value;
+        };
+      }
+
+      case 'CrossRef': {
+        const refName = node.value;
+        const ns = node.namespace;
+        const cn = node.cellName;
+        const start = node.start;
+        const end = node.end;
+        const expr = this.expression;
+        return (cellResolver, crossResolver) => {
+          if (!crossResolver) {
+            throw new StructuredError(
+              `跨命名空间引用 '${refName}' 不可用`,
+              start, end, expr
+            );
+          }
+          const result = crossResolver(ns, cn);
+          if (!result) {
+            throw new StructuredError(
+              `跨命名空间引用 '${refName}' 无法解析`,
+              start, end, expr
+            );
+          }
+          if (result.error) {
+            throw new StructuredError(result.error, start, end, expr);
+          }
+          return result.value;
+        };
+      }
+
+      case 'UnaryOp': {
+        const operandFn = this.compile(node.children[0]);
+        const op = node.value;
+        const start = node.start;
+        const end = node.end;
+        const expr = this.expression;
+        if (op === '+') {
+          return (cellResolver, crossResolver) => {
+            const operand = operandFn(cellResolver, crossResolver);
+            if (operand.type !== 'number') {
+              throw new StructuredError(
+                `一元运算符 '+' 只能用于数值类型`,
+                start, end, expr
+              );
+            }
+            return { type: 'number', value: operand.value };
+          };
+        } else {
+          return (cellResolver, crossResolver) => {
+            const operand = operandFn(cellResolver, crossResolver);
+            if (operand.type !== 'number') {
+              throw new StructuredError(
+                `一元运算符 '-' 只能用于数值类型`,
+                start, end, expr
+              );
+            }
+            return { type: 'number', value: -operand.value };
+          };
+        }
+      }
+
+      case 'BinOp': {
+        const leftFn = this.compile(node.children[0]);
+        const rightFn = this.compile(node.children[1]);
+        const op = node.value;
+        const opStart = node.opStart;
+        const opEnd = node.opEnd;
+        const start = node.start;
+        const end = node.end;
+        const expr = this.expression;
+
+        if (op === '+') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== 'number' || right.type !== 'number') {
+              throw new StructuredError(
+                `算术运算符 '+' 需要两个数值类型`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value + right.value };
+          };
+        }
+        if (op === '-') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== 'number' || right.type !== 'number') {
+              throw new StructuredError(
+                `算术运算符 '-' 需要两个数值类型`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value - right.value };
+          };
+        }
+        if (op === '*') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== 'number' || right.type !== 'number') {
+              throw new StructuredError(
+                `算术运算符 '*' 需要两个数值类型`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value * right.value };
+          };
+        }
+        if (op === '/') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== 'number' || right.type !== 'number') {
+              throw new StructuredError(
+                `算术运算符 '/' 需要两个数值类型`,
+                opStart, opEnd, expr
+              );
+            }
+            if (right.value === 0) {
+              throw new StructuredError('除数不能为零', opStart, opEnd, expr);
+            }
+            return { type: 'number', value: left.value / right.value };
+          };
+        }
+        if (op === '>') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '>' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value > right.value ? 1 : 0 };
+          };
+        }
+        if (op === '<') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '<' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value < right.value ? 1 : 0 };
+          };
+        }
+        if (op === '>=') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '>=' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value >= right.value ? 1 : 0 };
+          };
+        }
+        if (op === '<=') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '<=' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value <= right.value ? 1 : 0 };
+          };
+        }
+        if (op === '==') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '==' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value === right.value ? 1 : 0 };
+          };
+        }
+        if (op === '!=') {
+          return (cellResolver, crossResolver) => {
+            const left = leftFn(cellResolver, crossResolver);
+            const right = rightFn(cellResolver, crossResolver);
+            if (left.type !== right.type) {
+              throw new StructuredError(
+                `比较运算符 '!=' 需要两个相同类型的操作数`,
+                opStart, opEnd, expr
+              );
+            }
+            return { type: 'number', value: left.value !== right.value ? 1 : 0 };
+          };
+        }
+        throw new StructuredError(`未知的二元运算符: ${op}`, opStart, opEnd, expr);
+      }
+
+      case 'Function': {
+        return this.compileFunction(node);
+      }
+
+      default:
+        throw new StructuredError(
+          `未知的AST节点类型: ${node.type}`,
+          node.start, node.end, this.expression
+        );
+    }
+  }
+
+  compileFunction(node) {
+    const funcName = node.value;
+    const nameStart = node.nameStart;
+    const nameEnd = node.nameEnd;
+    const expr = this.expression;
+    const argFns = node.children.map(c => this.compile(c));
+
+    switch (funcName) {
+      case 'IF': {
+        const condFn = argFns[0];
+        const trueFn = argFns[1];
+        const falseFn = argFns[2];
+        return (cellResolver, crossResolver) => {
+          const cond = condFn(cellResolver, crossResolver);
+          if (cond.type !== 'number') {
+            throw new StructuredError('IF的条件必须是数值类型', nameStart, nameEnd, expr);
+          }
+          return cond.value !== 0
+            ? trueFn(cellResolver, crossResolver)
+            : falseFn(cellResolver, crossResolver);
+        };
+      }
+
+      case 'MIN': {
+        return (cellResolver, crossResolver) => {
+          const args = argFns.map(fn => fn(cellResolver, crossResolver));
+          args.forEach((a, i) => {
+            if (a.type !== 'number') {
+              throw new StructuredError(
+                `MIN的第 ${i + 1} 个参数必须是数值类型`,
+                nameStart, nameEnd, expr
+              );
+            }
+          });
+          return { type: 'number', value: Math.min(...args.map(a => a.value)) };
+        };
+      }
+
+      case 'MAX': {
+        return (cellResolver, crossResolver) => {
+          const args = argFns.map(fn => fn(cellResolver, crossResolver));
+          args.forEach((a, i) => {
+            if (a.type !== 'number') {
+              throw new StructuredError(
+                `MAX的第 ${i + 1} 个参数必须是数值类型`,
+                nameStart, nameEnd, expr
+              );
+            }
+          });
+          return { type: 'number', value: Math.max(...args.map(a => a.value)) };
+        };
+      }
+
+      case 'ABS': {
+        const argFn = argFns[0];
+        return (cellResolver, crossResolver) => {
+          const a = argFn(cellResolver, crossResolver);
+          if (a.type !== 'number') {
+            throw new StructuredError('ABS的参数必须是数值类型', nameStart, nameEnd, expr);
+          }
+          return { type: 'number', value: Math.abs(a.value) };
+        };
+      }
+
+      case 'ROUND': {
+        const argFn0 = argFns[0];
+        const argFn1 = argFns[1];
+        return (cellResolver, crossResolver) => {
+          const a0 = argFn0(cellResolver, crossResolver);
+          const a1 = argFn1(cellResolver, crossResolver);
+          if (a0.type !== 'number') {
+            throw new StructuredError('ROUND的第一个参数必须是数值类型', nameStart, nameEnd, expr);
+          }
+          if (a1.type !== 'number') {
+            throw new StructuredError('ROUND的第二个参数必须是数值类型', nameStart, nameEnd, expr);
+          }
+          const factor = Math.pow(10, Math.round(a1.value));
+          return { type: 'number', value: Math.round(a0.value * factor) / factor };
+        };
+      }
+
+      case 'CONCAT': {
+        return (cellResolver, crossResolver) => {
+          const args = argFns.map(fn => fn(cellResolver, crossResolver));
+          const strs = args.map(a => a.value.toString());
+          return { type: 'string', value: strs.join('') };
+        };
+      }
+
+      default:
+        throw new StructuredError(`未知的函数: ${funcName}`, nameStart, nameEnd, expr);
+    }
+  }
+}
+
+function compileExpression(ast, expression) {
+  const compiler = new ExpressionCompiler(expression || null);
+  return compiler.compile(ast);
+}
+
+module.exports = {
+  parseExpression,
+  evaluateExpression,
+  traceExpression,
+  compileExpression,
+  StructuredError,
+  findCellRefPosition
+};

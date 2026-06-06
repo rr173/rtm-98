@@ -103,9 +103,19 @@ class WebSocketManager {
     }
   }
 
+  sanitizeChangesForBroadcast(changes) {
+    return changes.map(change => {
+      if (change.lazy && change.status === 'dirty') {
+        return { name: change.name, status: 'dirty' };
+      }
+      return change;
+    });
+  }
+
   broadcastChanges(changes, sourceClientId = null) {
     if (changes.length === 0) return;
-    const message = JSON.stringify({ type: 'batch', data: { changes } });
+    const sanitized = this.sanitizeChangesForBroadcast(changes);
+    const message = JSON.stringify({ type: 'batch', data: { changes: sanitized } });
     for (const info of this.clients.values()) {
       if (!info.namespace && info.ws.readyState === WebSocket.OPEN) {
         info.ws.send(message);
@@ -115,7 +125,8 @@ class WebSocketManager {
 
   broadcastChangesToNamespace(namespace, changes) {
     if (changes.length === 0) return;
-    const message = JSON.stringify({ type: 'batch', data: { changes, namespace } });
+    const sanitized = this.sanitizeChangesForBroadcast(changes);
+    const message = JSON.stringify({ type: 'batch', data: { changes: sanitized, namespace } });
     for (const info of this.clients.values()) {
       if (info.namespace === namespace && info.ws.readyState === WebSocket.OPEN) {
         info.ws.send(message);

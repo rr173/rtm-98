@@ -334,6 +334,15 @@ app.get('/api/cells/:name', requireNamespace, (req, res) => {
   res.json({ cell });
 });
 
+app.get('/api/cells/:name/compiled', requireNamespace, (req, res) => {
+  const graph = getComputeGraph(req);
+  const status = graph.getCompiledStatus(req.params.name);
+  if (!status) {
+    return res.status(404).json({ error: `单元格 '${req.params.name}' 不存在` });
+  }
+  res.json(status);
+});
+
 app.get('/api/cells/:name/trace', requireNamespace, (req, res) => {
   const graph = getComputeGraph(req);
   try {
@@ -345,7 +354,7 @@ app.get('/api/cells/:name/trace', requireNamespace, (req, res) => {
 });
 
 app.post('/api/cells', requireNamespace, (req, res) => {
-  const { name, type, value } = req.body;
+  const { name, type, value, lazy } = req.body;
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
@@ -355,7 +364,7 @@ app.post('/api/cells', requireNamespace, (req, res) => {
   }
 
   try {
-    const { cell, changes } = graph.createCell(name, type, value);
+    const { cell, changes } = graph.createCell(name, type, value, { lazy: !!lazy });
 
     if (req.namespace) {
       wsManager.broadcastChangesToNamespace(req.namespace, changes);
@@ -369,7 +378,7 @@ app.post('/api/cells', requireNamespace, (req, res) => {
       rules.checkRules(graph, req.namespace);
     }
 
-    audit.append('create', operator, name, null, { type, rawValue: value });
+    audit.append('create', operator, name, null, { type, rawValue: value, lazy: !!lazy });
     res.json({ cell, changes });
   } catch (e) {
     const errorResp = { error: e.message };
@@ -382,7 +391,7 @@ app.post('/api/cells', requireNamespace, (req, res) => {
 
 app.put('/api/cells/:name', requireNamespace, (req, res) => {
   const { name } = req.params;
-  const { type, value, renameTo } = req.body;
+  const { type, value, renameTo, lazy } = req.body;
   const operator = getOperator(req);
   const graph = getComputeGraph(req);
   const audit = getAuditEngine(req);
@@ -424,9 +433,9 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
 
   try {
     const existingCell = graph.getCell(name);
-    const oldDef = existingCell ? { type: existingCell.type, rawValue: existingCell.rawValue } : null;
+    const oldDef = existingCell ? { type: existingCell.type, rawValue: existingCell.rawValue, lazy: existingCell.lazy } : null;
 
-    const { cell, changes } = graph.updateCell(name, type, value);
+    const { cell, changes } = graph.updateCell(name, type, value, { lazy });
 
     if (req.namespace) {
       wsManager.broadcastChangesToNamespace(req.namespace, changes);
@@ -440,7 +449,7 @@ app.put('/api/cells/:name', requireNamespace, (req, res) => {
       rules.checkRules(graph, req.namespace);
     }
 
-    audit.append('update', operator, name, oldDef, { type, rawValue: value });
+    audit.append('update', operator, name, oldDef, { type, rawValue: value, lazy: lazy !== undefined ? !!lazy : (existingCell ? existingCell.lazy : false) });
     res.json({ cell, changes });
   } catch (e) {
     const errorResp = { error: e.message };
@@ -537,6 +546,31 @@ app.post('/api/cells/batch', requireNamespace, (req, res) => {
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
+});
+
+app.get('/api/cache/stats', requireNamespace, (req, res) => {
+  const graph = getComputeGraph(req);
+  res.json(graph.getCacheStats());
+});
+
+app.post('/api/cache/invalidate', requireNamespace, (req, res) => {
+  const graph = getComputeGraph(req);
+  const result = graph.invalidateAllCaches();
+  res.json(result);
+});
+
+app.get('/api/cache/cells', requireNamespace, (req, res) => {
+  const graph = getComputeGraph(req);
+  res.json({ cells: graph.getAllCacheDetails() });
+});
+
+app.get('/api/cache/benchmark', requireNamespace, (req, res) => {
+  const graph = getComputeGraph(req);
+  const result = graph.runBenchmark();
+  if (result.error) {
+    return res.status(400).json(result);
+  }
+  res.json(result);
 });
 
 app.post('/api/snapshots', requireNamespace, (req, res) => {
